@@ -12,7 +12,7 @@ from xmlrpc.server import SimpleXMLRPCServer
 # -------------------------
 MY_PORT = 7000
 MY_NAME = "t_signal"
-ZOOKEEPER_IP = "http://192.168.0.111:6000"  # Fixed to localhost
+ZOOKEEPER_IP = "http://localhost:6000"  # Fixed to localhost
 
 # Initial clock skew: +30 minutes (in seconds)
 local_skew = 30 * 60
@@ -113,7 +113,17 @@ def traffic_detection_loop():
                 request_stats["average_burst_response_time"] = total_burst_time / request_stats["burst_count"]
 
         print(f"[{MY_NAME}] Burst #{burst_counter} completed in {burst_duration:.2f}s")
+        # After burst completion, add adaptive throttling
+        with stats_lock:
+            recent_failures = request_stats["failed_requests"]
+            total_requests = request_stats["total_requests"]
 
+        if total_requests > 0:
+            failure_rate = recent_failures / total_requests
+            if failure_rate > 0.3:  # If >30% failure rate
+                adaptive_delay = sleep_time * 2  # Double the wait time
+                print(f"[{MY_NAME}] High failure rate detected, adaptive throttling: {adaptive_delay}s")
+                time.sleep(adaptive_delay - sleep_time)  # Additional delay
         # Random wait before next burst
         sleep_time = random.randint(REQUEST_INTERVAL_MIN, REQUEST_INTERVAL_MAX)
         print(f"[{MY_NAME}] Waiting {sleep_time}s before next burst...")

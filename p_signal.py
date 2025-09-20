@@ -14,7 +14,7 @@ MY_NAME = "p_signal"
 local_skew = -45 * 60
 
 # ZooKeeper IP (for RTO integration / monitoring)
-ZOOKEEPER_IP = "http://192.168.0.111:6000"
+ZOOKEEPER_IP = "http://localhost:6000"
 
 # Shared signal status (kept in sync with controllers)
 # This should be updated whenever controllers change states
@@ -36,11 +36,8 @@ stats_lock = threading.Lock()
 # -------------------------
 # PEDESTRIAN VOTING LOGIC
 # -------------------------
-def p_signal(target_pair):
-    """
-    Pedestrian acknowledgment for Ricart–Agrawala voting.
-    Only grants if pedestrian lights are RED (safe for traffic).
-    """
+def p_signal(self, target_pair):
+    """SECOND OK: Non-RA pedestrian safety check"""
     with stats_lock:
         request_stats["total_requests"] += 1
         request_stats["last_request_time"] = time.time()
@@ -48,12 +45,12 @@ def p_signal(target_pair):
     pedestrian_clear = check_pedestrian_crossing(target_pair)
 
     if pedestrian_clear:
-        print(f"[{MY_NAME}] CLEAR for {target_pair} - VOTE: OK")
+        print(f"[{MY_NAME}] PEDESTRIAN SAFETY CHECK: CLEAR for {target_pair}")
         with stats_lock:
             request_stats["granted_requests"] += 1
         return "OK"
     else:
-        print(f"[{MY_NAME}] PEDESTRIANS CROSSING {target_pair} - VOTE: DENY")
+        print(f"[{MY_NAME}] PEDESTRIAN SAFETY CHECK: CROSSING DETECTED for {target_pair}")
         with stats_lock:
             request_stats["denied_requests"] += 1
         return "DENY"
@@ -219,6 +216,7 @@ if __name__ == "__main__":
 
     server = SimpleXMLRPCServer(("0.0.0.0", MY_PORT), allow_none=True)
     server.register_function(p_signal, "p_signal")
+    server.register_function(p_signal_ra, "p_signal_ra")
     server.register_function(get_clock_value, "get_clock_value")
     server.register_function(set_time, "set_time")
     server.register_function(get_pedestrian_stats, "get_pedestrian_stats")

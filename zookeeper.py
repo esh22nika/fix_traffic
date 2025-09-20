@@ -1,60 +1,49 @@
-# zookeeper.py
-# Enhanced Load Balancer with Dynamic Scaling, Database, and Performance Optimization
-from xmlrpc import server
+# zookeeper.py - Complete Enhanced Load Balancer with RA, Berkeley, and GFS-style Replica Management
 from xmlrpc.server import SimpleXMLRPCServer
 from xmlrpc.client import ServerProxy, Transport
 import time
 import threading
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 import uuid
-import json
 import sqlite3
-from collections import deque
-import subprocess
-import sys
-import os
+from collections import deque, defaultdict
 import hashlib
+import logging
+import random
 
-import lb
-
-# Configuration
+# ====== CONFIGURATION ======
 ZOOKEEPER_PORT = 6000
+RESPONSE_TIMEOUT = 10
+DB_PATH = "traffic_system.db"
+
+# Controllers configuration
 BASE_CONTROLLERS = {
     "controller": "http://localhost:8000",
     "controller_clone": "http://localhost:8001"
 }
-BUFFER_SIZE = 5  # Increased buffer size
-MAX_DYNAMIC_CLONES = 3  # Maximum additional dynamic clones
-RESPONSE_TIMEOUT = 15  # Reduced timeout for faster failure detection
-DB_PATH = "traffic_system.db"
+
+# Client configuration for Berkeley sync
+BERKELEY_CLIENTS = {
+    "t_signal": "http://localhost:7000",
+    "p_signal": "http://localhost:9000"
+}
+
+# Replica servers configuration (GFS-style)
+REPLICA_SERVERS = {
+    "server_1": {"url": "http://localhost:7001", "port": 7001},
+    "server_2": {"url": "http://localhost:7002", "port": 7002},
+    "server_3": {"url": "http://localhost:7003", "port": 7003}
+}
+
+# Logging configuration
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+logger = logging.getLogger(__name__)
 
 
-def signal_request(self, client_id, target_pair, request_type="normal"):
-    """Entry point for t_signal requests"""
-    print(f"[ZOOKEEPER] Signal request from {client_id}: {target_pair} ({request_type})")
-
-    # Choose available controller
-    controller = self.get_available_controller()
-    if not controller:
-        return {"success": False, "reason": "No controllers available"}
-
-    # Forward to controller
-    try:
-        proxy = ServerProxy(controller.url, allow_none=True,
-                            transport=TimeoutTransport(RESPONSE_TIMEOUT))
-        result = proxy.signal_controller(target_pair)
-
-        print(f"[ZOOKEEPER] Request handled by {controller.name}")
-        return {"success": True, "controller": controller.name, "result": result}
-
-    except Exception as e:
-        print(f"[ZOOKEEPER] Request failed on {controller.name}: {e}")
-        return {"success": False, "reason": str(e)}
 class TimeoutTransport(Transport):
     def __init__(self, timeout):
         super().__init__()
         self.timeout = timeout
-
 
     def make_connection(self, host):
         conn = super().make_connection(host)
@@ -88,8 +77,7 @@ class DatabaseManager:
                     active_requests INTEGER,
                     buffer_size INTEGER,
                     last_heartbeat TIMESTAMP,
-                    total_processed INTEGER DEFAULT 0,
-                    is_dynamic BOOLEAN DEFAULT 0
+                    total_processed INTEGER DEFAULT 0
                 )
             ''')
             conn.execute('''
@@ -105,17 +93,7 @@ class DatabaseManager:
                     status TEXT
                 )
             ''')
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS vip_log (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    vehicle_id TEXT,
-                    priority INTEGER,
-                    target_pair TEXT,
-                    arrival_time TIMESTAMP,
-                    served_by TEXT,
-                    service_time REAL
-                )
-            ''')
+
             # Initialize default signal status
             default_signals = {
                 '1': 'RED', '2': 'RED', '3': 'GREEN', '4': 'GREEN',
@@ -127,318 +105,480 @@ class DatabaseManager:
                     (signal_id, status)
                 )
             conn.commit()
-            print(f"[DATABASE] Database initialized at {self.db_path}")
+            logger.info(f"Database initialized at {self.db_path}")
 
     def update_signal_status(self, signal_status_dict):
-        """Update signal status in database - Convert all keys to strings"""
+        """Update signal status in database"""
         with self.lock:
             with sqlite3.connect(self.db_path) as conn:
                 for signal_id, status in signal_status_dict.items():
-                    # Ensure signal_id is always a string
                     signal_id_str = str(signal_id)
                     conn.execute(
                         'INSERT OR REPLACE INTO signal_status (signal_id, status, last_updated) VALUES (?, ?, CURRENT_TIMESTAMP)',
                         (signal_id_str, status)
                     )
                 conn.commit()
-                print(f"[DATABASE] Updated signal status for {len(signal_status_dict)} signals")
 
     def get_signal_status(self):
         """Get current signal status"""
         with self.lock:
             with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.execute('SELECT signal_id, status, last_updated FROM signal_status')
-                return {row[0]: {'status': row[1], 'last_updated': row[2]} for row in cursor.fetchall()}
-
-    def update_controller_status(self, controller_name, **kwargs):
-        """Update controller status in database"""
-        with self.lock:
-            with sqlite3.connect(self.db_path) as conn:
-                # Check if controller exists
-                cursor = conn.execute('SELECT id FROM controller_status WHERE controller_name = ?', (controller_name,))
-                if cursor.fetchone():
-                    # Update existing
-                    set_clauses = []
-                    values = []
-                    for key, value in kwargs.items():
-                        if key in ['url', 'is_available', 'active_requests', 'buffer_size', 'total_processed',
-                                   'is_dynamic']:
-                            set_clauses.append(f'{key} = ?')
-                            values.append(value)
-                    if set_clauses:
-                        set_clauses.append('last_heartbeat = CURRENT_TIMESTAMP')
-                        values.append(controller_name)
-                        query = f'UPDATE controller_status SET {", ".join(set_clauses)} WHERE controller_name = ?'
-                        conn.execute(query, values)
-                else:
-                    # Insert new
-                    conn.execute('''
-                        INSERT INTO controller_status 
-                        (controller_name, url, is_available, active_requests, buffer_size, 
-                         last_heartbeat, total_processed, is_dynamic)
-                        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?)
-                    ''', (
-                        controller_name,
-                        kwargs.get('url', ''),
-                        kwargs.get('is_available', True),
-                        kwargs.get('active_requests', 0),
-                        kwargs.get('buffer_size', BUFFER_SIZE),
-                        kwargs.get('total_processed', 0),
-                        kwargs.get('is_dynamic', False)
-                    ))
-                conn.commit()
-
-    def log_request(self, request_id, request_type, target_pair, controller_assigned,
-                    start_time, end_time=None, status="processing"):
-        """Log request to database"""
-        with self.lock:
-            with sqlite3.connect(self.db_path) as conn:
-                response_time = (end_time - start_time) if end_time else None
-                conn.execute('''
-                    INSERT OR REPLACE INTO request_log 
-                    (request_id, request_type, target_pair, controller_assigned, start_time, 
-                     end_time, response_time, status)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (request_id, request_type, str(target_pair), controller_assigned,
-                      start_time, end_time, response_time, status))
-                conn.commit()
+                cursor = conn.execute('SELECT signal_id, status FROM signal_status')
+                return {row[0]: row[1] for row in cursor.fetchall()}
 
     def get_system_stats(self):
-        """Get comprehensive system statistics from database"""
+        """Get comprehensive system statistics"""
         with self.lock:
             with sqlite3.connect(self.db_path) as conn:
-                # Controller stats
                 controllers = conn.execute('''
-                    SELECT controller_name, url, is_available, active_requests, buffer_size,
-                           total_processed, is_dynamic, last_heartbeat
+                    SELECT controller_name, url, is_available, active_requests, 
+                           total_processed, last_heartbeat
                     FROM controller_status
                 ''').fetchall()
 
-                # Recent requests
-                recent_requests = conn.execute('''
-                    SELECT request_type, controller_assigned, response_time, status
-                    FROM request_log
-                    ORDER BY start_time DESC LIMIT 10
-                ''').fetchall()
-
-                # Signal status
                 signals = self.get_signal_status()
 
                 return {
-                    'controllers': [dict(
-                        zip(['name', 'url', 'available', 'active', 'buffer_size', 'processed', 'dynamic', 'heartbeat'],
-                            c)) for c in controllers],
-                    'recent_requests': [dict(zip(['type', 'controller', 'response_time', 'status'], r)) for r in
-                                        recent_requests],
+                    'controllers': [dict(zip(['name', 'url', 'available', 'active', 'processed', 'heartbeat'], c))
+                                    for c in controllers],
                     'signal_status': signals,
                     'timestamp': time.time()
                 }
 
 
+class ConsistentHashManager:
+    """Hash ring for chunk distribution across replica servers"""
+
+    def __init__(self, servers, virtual_nodes=150):  # Increased virtual nodes for better distribution
+        self.servers = servers
+        self.virtual_nodes = virtual_nodes
+        self.ring = {}
+        self.sorted_hashes = []
+        self._build_ring()
+
+    def _hash(self, key):
+        return int(hashlib.md5(key.encode()).hexdigest(), 16)
+
+    def _build_ring(self):
+        for server in self.servers:
+            for i in range(self.virtual_nodes):
+                virtual_key = f"{server}:{i}"
+                hash_value = self._hash(virtual_key)
+                self.ring[hash_value] = server
+
+        self.sorted_hashes = sorted(self.ring.keys())
+        logger.info(f"Built consistent hash ring with {len(self.ring)} virtual nodes")
+
+    def get_servers_for_key(self, key, count=3):
+        """Get servers responsible for a key"""
+        key_hash = self._hash(str(key))
+        servers = []
+
+        start_idx = 0
+        for i, hash_val in enumerate(self.sorted_hashes):
+            if hash_val >= key_hash:
+                start_idx = i
+                break
+
+        # Get servers starting from the hash position
+        checked = set()
+        for i in range(len(self.sorted_hashes)):
+            idx = (start_idx + i) % len(self.sorted_hashes)
+            server = self.ring[self.sorted_hashes[idx]]
+            if server not in checked:
+                servers.append(server)
+                checked.add(server)
+                if len(servers) >= count:
+                    break
+
+        return servers[:count]
+
+
+class ReaderWriterLock:
+    """Reader-Writer lock with starvation prevention using FIFO queue"""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.readers = 0
+        self.writers_waiting = 0
+        self.writer_active = False
+        self.read_condition = threading.Condition(self.lock)
+        self.write_condition = threading.Condition(self.lock)
+        self.request_queue = deque()  # FIFO queue to prevent starvation
+        self.queue_condition = threading.Condition(self.lock)
+
+    def acquire_read(self, client_id="unknown"):
+        request_id = f"READ_{client_id}_{time.time()}"
+        with self.lock:
+            self.request_queue.append(('read', request_id, threading.current_thread()))
+            logger.info(f"[RW-LOCK] {client_id} queued for READ access (queue size: {len(self.request_queue)})")
+
+            while True:
+                # Check if this read request is at the front and can proceed
+                if (self.request_queue and
+                        self.request_queue[0][1] == request_id and
+                        not self.writer_active and
+                        (self.writers_waiting == 0 or self.readers > 0)):
+                    self.readers += 1
+                    self.request_queue.popleft()  # Remove from queue
+                    logger.info(f"[RW-LOCK] {client_id} acquired READ lock (readers: {self.readers})")
+                    return
+
+                self.queue_condition.wait()
+
+    def release_read(self, client_id="unknown"):
+        with self.lock:
+            self.readers -= 1
+            logger.info(f"[RW-LOCK] {client_id} released READ lock (readers: {self.readers})")
+            if self.readers == 0:
+                self.queue_condition.notifyAll()  # Wake up waiting writers
+
+    def acquire_write(self, client_id="unknown"):
+        request_id = f"WRITE_{client_id}_{time.time()}"
+        with self.lock:
+            self.writers_waiting += 1
+            self.request_queue.append(('write', request_id, threading.current_thread()))
+            logger.info(f"[RW-LOCK] {client_id} queued for WRITE access (queue size: {len(self.request_queue)})")
+
+            while True:
+                # Check if this write request is at the front and can proceed
+                if (self.request_queue and
+                        self.request_queue[0][1] == request_id and
+                        self.readers == 0 and
+                        not self.writer_active):
+                    self.writers_waiting -= 1
+                    self.writer_active = True
+                    self.request_queue.popleft()  # Remove from queue
+                    logger.info(f"[RW-LOCK] {client_id} acquired WRITE lock")
+                    return
+
+                self.queue_condition.wait()
+
+    def release_write(self, client_id="unknown"):
+        with self.lock:
+            self.writer_active = False
+            logger.info(f"[RW-LOCK] {client_id} released WRITE lock")
+            self.queue_condition.notifyAll()  # Wake up all waiting requests
+
+
+class ReplicaManager:
+    """Google File System style replica management with proper chunking"""
+
+    def __init__(self):
+        self.hash_manager = ConsistentHashManager(list(REPLICA_SERVERS.keys()))
+        self.locks = {server: ReaderWriterLock() for server in REPLICA_SERVERS.keys()}
+        self.chunk_size = 3  # Smaller chunks for better distribution
+        self.replication_factor = 3
+        self.active_reads = defaultdict(int)
+        self.active_writes = defaultdict(int)
+
+    def _create_chunks(self, data_items, data_type):
+        """Create chunks from data items"""
+        if isinstance(data_items, dict):
+            items = list(data_items.items())
+        else:
+            items = list(data_items) if data_items else []
+
+        if not items:
+            # Create at least one empty chunk
+            items = [("placeholder", "empty")]
+
+        chunks = {}
+        for i in range(0, len(items), self.chunk_size):
+            chunk_data = items[i:i + self.chunk_size]
+            chunk_id = f"{data_type}_chunk_{i // self.chunk_size}"
+
+            # Get servers for this chunk using consistent hashing
+            responsible_servers = self.hash_manager.get_servers_for_key(chunk_id, self.replication_factor)
+
+            chunks[chunk_id] = {
+                'chunk_id': i // self.chunk_size,
+                'data': chunk_data,
+                'servers': responsible_servers,
+                'size': len(chunk_data)
+            }
+
+        return chunks
+
+    def get_chunk_metadata(self, data_type):
+        """Get detailed chunk metadata"""
+        try:
+            # Get data from first available replica
+            sample_data = None
+            for server_name, server_info in REPLICA_SERVERS.items():
+                try:
+                    proxy = ServerProxy(server_info['url'], allow_none=True,
+                                        transport=TimeoutTransport(5))
+                    if data_type == "signal_status":
+                        sample_data = proxy.get_signal_status()
+                    elif data_type == "system_status":
+                        sample_data = proxy.get_system_stats()
+                    break
+                except Exception as e:
+                    logger.warning(f"Failed to get sample data from {server_name}: {e}")
+                    continue
+
+            if sample_data is None:
+                # Return default metadata if no data available
+                sample_data = {"placeholder": "empty"}
+
+            chunks = self._create_chunks(sample_data, data_type)
+
+            metadata = {
+                'total_chunks': len(chunks),
+                'chunk_size': self.chunk_size,
+                'replication_factor': self.replication_factor,
+                'data_type': data_type,
+                'chunk_distribution': {chunk_id: chunk_info['servers']
+                                       for chunk_id, chunk_info in chunks.items()},
+                'chunk_details': {chunk_id: {
+                    'size': chunk_info['size'],
+                    'servers': chunk_info['servers'],
+                    'chunk_number': chunk_info['chunk_id']
+                } for chunk_id, chunk_info in chunks.items()}
+            }
+
+            logger.info(
+                f"[GFS] Generated metadata for {data_type}: {len(chunks)} chunks across {len(REPLICA_SERVERS)} servers")
+            return metadata
+
+        except Exception as e:
+            logger.error(f"[GFS] Failed to generate metadata for {data_type}: {e}")
+            # Return minimal metadata to prevent empty returns
+            return {
+                'total_chunks': 1,
+                'chunk_size': self.chunk_size,
+                'replication_factor': self.replication_factor,
+                'data_type': data_type,
+                'chunk_distribution': {f"{data_type}_chunk_0": list(REPLICA_SERVERS.keys())},
+                'chunk_details': {f"{data_type}_chunk_0": {
+                    'size': 1,
+                    'servers': list(REPLICA_SERVERS.keys()),
+                    'chunk_number': 0
+                }}
+            }
+
+    def acquire_read_access(self, data_type, client_id):
+        """Acquire read access using load balancing"""
+        chunk_key = f"{data_type}_read_{client_id}"
+        candidate_servers = self.hash_manager.get_servers_for_key(chunk_key, 1)
+
+        for server in candidate_servers:
+            try:
+                self.locks[server].acquire_read(client_id)
+                self.active_reads[server] += 1
+                logger.info(f"[GFS] {client_id} acquired READ access on {server}")
+                return server
+            except Exception as e:
+                logger.warning(f"[GFS] Failed to acquire read on {server}: {e}")
+                continue
+
+        # Fallback: try any server
+        for server in REPLICA_SERVERS.keys():
+            try:
+                self.locks[server].acquire_read(client_id)
+                self.active_reads[server] += 1
+                logger.info(f"[GFS] {client_id} acquired READ access on {server} (fallback)")
+                return server
+            except Exception as e:
+                continue
+
+        logger.error(f"[GFS] Failed to acquire READ access for {client_id}")
+        return None
+
+    def release_read_access(self, server, client_id):
+        """Release read access"""
+        try:
+            self.locks[server].release_read(client_id)
+            self.active_reads[server] = max(0, self.active_reads[server] - 1)
+            logger.info(f"[GFS] {client_id} released READ access on {server}")
+        except Exception as e:
+            logger.error(f"[GFS] Failed to release read access for {client_id}: {e}")
+
+    def acquire_write_access(self, data_type, client_id):
+        """Acquire write access to all replicas with timeout"""
+        servers = list(REPLICA_SERVERS.keys())
+        acquired = []
+
+        logger.info(f"[GFS] {client_id} attempting to acquire WRITE access on {len(servers)} servers")
+
+        try:
+            # Try to acquire locks on all servers with timeout
+            for server in servers:
+                try:
+                    # Use a timeout mechanism
+                    lock_acquired = False
+                    start_time = time.time()
+
+                    def acquire_with_timeout():
+                        nonlocal lock_acquired
+                        self.locks[server].acquire_write(client_id)
+                        lock_acquired = True
+
+                    thread = threading.Thread(target=acquire_with_timeout)
+                    thread.daemon = True
+                    thread.start()
+                    thread.join(timeout=5.0)  # 5 second timeout per server
+
+                    if lock_acquired:
+                        acquired.append(server)
+                        self.active_writes[server] += 1
+                    else:
+                        raise TimeoutError(f"Timeout acquiring write lock on {server}")
+
+                except Exception as e:
+                    logger.warning(f"[GFS] Failed to acquire write lock on {server}: {e}")
+                    # Rollback acquired locks
+                    for acq_server in acquired:
+                        self.locks[acq_server].release_write(client_id)
+                        self.active_writes[acq_server] -= 1
+                    return None
+
+            logger.info(f"[GFS] {client_id} acquired WRITE access on all {len(acquired)} servers")
+            return acquired
+
+        except Exception as e:
+            logger.error(f"[GFS] Write access acquisition failed for {client_id}: {e}")
+            return None
+
+    def release_write_access(self, servers, client_id):
+        """Release write access on all servers"""
+        for server in servers:
+            try:
+                self.locks[server].release_write(client_id)
+                self.active_writes[server] = max(0, self.active_writes[server] - 1)
+            except Exception as e:
+                logger.error(f"[GFS] Failed to release write access on {server}: {e}")
+
+        logger.info(f"[GFS] {client_id} released WRITE access on {len(servers)} servers")
+
+    def replicate_write(self, servers, operation, client_id, *args, **kwargs):
+        """Perform write on all replicas with verification"""
+        results = {}
+        successful_writes = 0
+
+        logger.info(f"[GFS] {client_id} performing {operation} on {len(servers)} replicas")
+
+        for server in servers:
+            try:
+                proxy = ServerProxy(REPLICA_SERVERS[server]['url'], allow_none=True,
+                                    transport=TimeoutTransport(RESPONSE_TIMEOUT))
+
+                if operation == "update_signal_status":
+                    result = proxy.update_signal_status(*args)
+                elif operation == "update_controller_status":
+                    result = proxy.update_controller_status(*args, **kwargs)
+                else:
+                    result = "UNKNOWN_OPERATION"
+
+                results[server] = result
+                if result == "OK":
+                    successful_writes += 1
+
+            except Exception as e:
+                results[server] = f"ERROR: {e}"
+                logger.error(f"[GFS] Write failed on {server}: {e}")
+
+        logger.info(f"[GFS] Write operation completed: {successful_writes}/{len(servers)} successful")
+        return results
+
+
 class ControllerState:
-    def __init__(self, name: str, url: str, is_dynamic: bool = False):
+    """State management for controllers with RA support"""
+
+    def __init__(self, name: str, url: str):
         self.name = name
         self.url = url
-        self.active_requests = deque(maxlen=BUFFER_SIZE)
+        self.active_requests = 0
+        self.total_processed = 0
         self.is_available = True
         self.last_heartbeat = time.time()
         self.lock = threading.Lock()
-        self.total_processed = 0
-        self.is_dynamic = is_dynamic
 
-    def is_free(self) -> bool:
+        # Ricart-Agrawala state
+        self.requesting_cs = False
+        self.in_cs = False
+        self.deferred_replies = []
+        self.lamport_clock = 0
+
+    def add_request(self):
         with self.lock:
-            return len(self.active_requests) < BUFFER_SIZE and self.is_available
+            self.active_requests += 1
 
-    def add_request(self, request_id: str):
+    def complete_request(self):
         with self.lock:
-            self.active_requests.append(request_id)
-            print(f"[ZOOKEEPER] Buffer {self.name}: {len(self.active_requests)}/{BUFFER_SIZE}")
+            self.active_requests = max(0, self.active_requests - 1)
+            self.total_processed += 1
 
-    def complete_request(self, request_id: str):
+    def get_load(self):
         with self.lock:
-            try:
-                self.active_requests.remove(request_id)
-                self.total_processed += 1
-                print(f"[ZOOKEEPER] Completed {self.name} {request_id}, buffer: {len(self.active_requests)}/{BUFFER_SIZE}")
-            except ValueError:
-                pass
-
-
-class DynamicCloneManager:
-    def __init__(self, base_port=8002):
-        self.base_port = base_port
-        self.dynamic_clones = {}
-        self.clone_counter = 0
-
-    def create_dynamic_clone(self) -> tuple:
-        """Create a new dynamic controller clone"""
-        if len(self.dynamic_clones) >= MAX_DYNAMIC_CLONES:
-            print(f"[CLONE-MANAGER] Maximum dynamic clones ({MAX_DYNAMIC_CLONES}) reached")
-            return None, None
-
-        self.clone_counter += 1
-        clone_name = f"dynamic_clone_{self.clone_counter}"
-        clone_port = self.base_port + self.clone_counter
-        clone_url = f"http://localhost:{clone_port}"
-
-        try:
-            # Create a modified version of controller_clone.py with different port
-            self._create_clone_script(clone_name, clone_port)
-
-            # Start the clone process
-            clone_process = subprocess.Popen([
-                sys.executable, f"{clone_name}.py"
-            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
-            # Wait a moment for it to start
-            time.sleep(2)
-
-            # Test if it's responding
-            test_proxy = ServerProxy(clone_url, allow_none=True, transport=TimeoutTransport(2))
-            response = test_proxy.ping()
-            if response == "OK":
-                self.dynamic_clones[clone_name] = {
-                    'process': clone_process,
-                    'port': clone_port,
-                    'url': clone_url
-                }
-                print(f"[CLONE-MANAGER] Dynamic clone {clone_name} created successfully on port {clone_port}")
-                return clone_name, clone_url
-            else:
-                clone_process.terminate()
-                return None, None
-
-        except Exception as e:
-            print(f"[CLONE-MANAGER] Failed to create dynamic clone: {e}")
-            return None, None
-
-    def _create_clone_script(self, clone_name, port):
-        """Create a dynamic clone script file"""
-        template_content = f'''
-# {clone_name}.py - Dynamically created controller clone
-from xmlrpc.server import SimpleXMLRPCServer
-from xmlrpc.client import ServerProxy, Transport
-import time
-import threading
-from dataclasses import dataclass
-from typing import List
-import uuid
-
-# Configuration for dynamic clone
-CLIENTS = {{
-    "t_signal": "http://localhost:7000",
-    "p_signal": "http://localhost:9000",
-}}
-PEDESTRIAN_IP = CLIENTS["p_signal"]
-RESPONSE_TIMEOUT = 3
-VIP_CROSSING_TIME = 0.1  # Minimal processing time
-CONTROLLER_PORT = {port}
-CONTROLLER_NAME = "{clone_name.upper()}"
-
-server_skew = 0.0
-state_lock = threading.Lock()
-vip_queues = {{"12": [], "34": []}}
-
-# Simplified signal status - all keys as strings
-signal_status = {{
-    "1": "RED", "2": "RED", "3": "GREEN", "4": "GREEN",
-    "P1": "GREEN", "P2": "GREEN", "P3": "RED", "P4": "RED"
-}}
-
-def ping():
-    return "OK"
-
-def signal_controller(target_pair):
-    print(f"[{{CONTROLLER_NAME}}] Processing signal request for {{target_pair}}")
-    time.sleep(0.1)
-    return True
-
-def vip_arrival(target_pair, priority=1, vehicle_id=None):
-    print(f"[{{CONTROLLER_NAME}}] Processing VIP request for {{target_pair}}")
-    time.sleep(0.1)
-    return True
-
-if __name__ == "__main__":
-    print(f"[{{CONTROLLER_NAME}}] Dynamic clone starting on port {{CONTROLLER_PORT}}")
-    server = SimpleXMLRPCServer(("0.0.0.0", CONTROLLER_PORT), allow_none=True)
-    server.register_function(signal_controller, "signal_controller")
-    server.register_function(vip_arrival, "vip_arrival")
-    server.register_function(ping, "ping")
-
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        print(f"\\n[{{CONTROLLER_NAME}}] Shutting down...")
-'''
-        with open(f"{clone_name}.py", 'w') as f:
-            f.write(template_content)
+            return self.active_requests
 
 
 class ZooKeeperLoadBalancer:
     def __init__(self):
         self.db = DatabaseManager(DB_PATH)
+        self.replica_manager = ReplicaManager()
         self.controllers = {}
-        self.clone_manager = DynamicCloneManager()
-        self.round_robin_index = 0
         self.lock = threading.Lock()
-        self.replica_manager = DataReplicaManager()
+
+        # Ricart-Agrawala state
         self.lamport_clock = 0
         self.clock_lock = threading.Lock()
-        self.ra_state = {}  # Ricart-Agrawala state management
-        self.pending_requests = {}  # For deferred RA messages
+        self.pending_vip_requests = {"12": [], "34": []}
+        self.ra_votes = {}  # Track RA voting
 
-        # Client registry for Berkeley sync
-        self.clients = {
-            "t_signal": "http://localhost:7000",
-            "p_signal": "http://localhost:9000"
-        }
-        # Initialize base controllers
+        # Initialize controllers
         for name, url in BASE_CONTROLLERS.items():
             self.controllers[name] = ControllerState(name, url)
-            self.db.update_controller_status(
-                name, url=url, is_available=True, active_requests=0,
-                buffer_size=BUFFER_SIZE, total_processed=0, is_dynamic=False
-            )
+
+        logger.info("ZooKeeper Load Balancer initialized with RA support")
 
     def increment_lamport_clock(self):
-        """Increment Lamport clock for RA algorithm"""
+        """Increment Lamport clock for RA"""
         with self.clock_lock:
             self.lamport_clock += 1
             return self.lamport_clock
 
-    def request_ped_ack(self, controller_name, target_pair, timestamp, request_type, requester_info=None):
-        """Mediate pedestrian acknowledgment requests"""
-        print(f"[ZOOKEEPER] Forwarding pedestrian ack request from {controller_name}")
-        try:
-            proxy = ServerProxy(self.clients["p_signal"], allow_none=True,
-                                transport=TimeoutTransport(RESPONSE_TIMEOUT))
-            # Enhanced p_signal call with RA parameters
-            response = proxy.p_signal_ra(target_pair, timestamp, controller_name, request_type)
-            return response
-        except Exception as e:
-            print(f"[ZOOKEEPER] Failed to get pedestrian ack: {e}")
-            return "DENY"
+    def update_lamport_clock(self, received_timestamp):
+        """Update Lamport clock on message receipt"""
+        with self.clock_lock:
+            self.lamport_clock = max(self.lamport_clock, received_timestamp) + 1
 
+    # ====== RICART-AGRAWALA IMPLEMENTATION ======
     def forward_ra_request(self, from_controller, to_controller, timestamp, target_pair, request_type):
-        """Forward Ricart-Agrawala requests between controllers"""
-        request_id = f"RA_{from_controller}_{timestamp}"
-        print(f"[ZOOKEEPER] Forwarding RA request {request_id}: {from_controller} -> {to_controller}")
+        """Forward RA request between controllers AND p_signal"""
+        logger.info(
+            f"[RA] Forwarding RA request: {from_controller} -> {to_controller} (ts={timestamp}, type={request_type})")
+
+        self.update_lamport_clock(timestamp)
 
         try:
-            if to_controller in self.controllers:
+            if to_controller == "p_signal":
+                # p_signal always votes OK for RA (separate from pedestrian safety check)
+                proxy = ServerProxy(BERKELEY_CLIENTS["p_signal"], allow_none=True,
+                                    transport=TimeoutTransport(RESPONSE_TIMEOUT))
+                response = proxy.p_signal_ra(target_pair, timestamp, from_controller, request_type)
+                logger.info(f"[RA] p_signal RA vote: {response}")
+                return response
+
+            elif to_controller in self.controllers:
                 controller = self.controllers[to_controller]
                 proxy = ServerProxy(controller.url, allow_none=True,
                                     transport=TimeoutTransport(RESPONSE_TIMEOUT))
                 response = proxy.receive_ra_request(from_controller, timestamp, target_pair, request_type)
+                logger.info(f"[RA] {to_controller} RA response: {response}")
                 return response
+
             return "DEFER"
         except Exception as e:
-            print(f"[ZOOKEEPER] RA forwarding failed: {e}")
+            logger.error(f"[RA] Failed to forward request: {e}")
             return "DEFER"
 
     def forward_ra_response(self, from_controller, to_controller, response_type, timestamp, target_pair):
-        """Forward RA responses (OK/DEFER)"""
+        """Forward RA response (OK/DEFER) back to requesting controller"""
+        logger.info(f"[RA] Forwarding RA response: {from_controller} -> {to_controller} ({response_type})")
+
         try:
             if to_controller in self.controllers:
                 controller = self.controllers[to_controller]
@@ -447,564 +587,477 @@ class ZooKeeperLoadBalancer:
                 proxy.receive_ra_response(from_controller, response_type, timestamp, target_pair)
                 return "OK"
         except Exception as e:
-            print(f"[ZOOKEEPER] RA response forwarding failed: {e}")
+            logger.error(f"[RA] Failed to forward response: {e}")
             return "FAIL"
 
-    def initiate_berkeley_sync(self, controller_name):
-        """Coordinate Berkeley clock synchronization"""
-        print(f"[ZOOKEEPER] Initiating Berkeley sync for {controller_name}")
+    def request_ped_ack(self, controller_name, target_pair, timestamp, request_type, requester_info=""):
+        """SECOND p_signal OK: Get pedestrian acknowledgment (separate from RA voting)"""
+        logger.info(f"[PEDESTRIAN] {controller_name} requesting pedestrian clearance for {target_pair}")
 
-        if controller_name not in self.controllers:
-            return "CONTROLLER_NOT_FOUND"
-
-        controller = self.controllers[controller_name]
         try:
-            proxy = ServerProxy(controller.url, allow_none=True,
+            proxy = ServerProxy(BERKELEY_CLIENTS["p_signal"], allow_none=True,
                                 transport=TimeoutTransport(RESPONSE_TIMEOUT))
-            proxy.berkeley_cycle_once()
+            response = proxy.p_signal(target_pair)  # Non-RA pedestrian safety check
+            logger.info(f"[PEDESTRIAN] Safety check response: {response}")
+            return response
+        except Exception as e:
+            logger.error(f"[PEDESTRIAN] Failed to get safety clearance: {e}")
+            return "DENY"
+
+    # ====== VIP DEADLOCK RESOLUTION ======
+    def handle_vip_deadlock(self, vip1_info, vip2_info):
+        """Handle VIP deadlock: let already-green junction go first"""
+        vip1_pair = vip1_info['target_pair']
+        vip2_pair = vip2_info['target_pair']
+
+        current_green = self.get_current_green_pair()
+
+        logger.warning(f"[VIP-DEADLOCK] DETECTED: VIP at {vip1_pair} and VIP at {vip2_pair}")
+        logger.warning(f"[VIP-DEADLOCK] Current green signals: {current_green}")
+
+        if current_green == vip1_pair:
+            first, second = vip1_info, vip2_info
+            logger.info(f"[VIP-DEADLOCK] RESOLVED: {vip1_pair} (already green) goes first, then {vip2_pair}")
+        elif current_green == vip2_pair:
+            first, second = vip2_info, vip1_info
+            logger.info(f"[VIP-DEADLOCK] RESOLVED: {vip2_pair} (already green) goes first, then {vip1_pair}")
+        else:
+            # Neither is green, use timestamp
+            if vip1_info['timestamp'] < vip2_info['timestamp']:
+                first, second = vip1_info, vip2_info
+            else:
+                first, second = vip2_info, vip1_info
+            logger.info(f"[VIP-DEADLOCK] RESOLVED: Using timestamp priority - {first['target_pair']} first")
+
+        return first, second
+
+    # ====== BERKELEY CLOCK SYNC (7 STEPS) ======
+    def coordinate_berkeley_sync(self, time_server_controller):
+        """7-Step Berkeley Clock Synchronization"""
+        logger.info(f"[BERKELEY-STEP1] Starting 7-step sync with {time_server_controller} as time server")
+
+        try:
+            # Step 1: Time server gets its current time
+            server_time = time.time()
+            logger.info(f"[BERKELEY-STEP1] Time server time: {server_time}")
+
+            # Step 2-3: Broadcast time and collect client responses
+            client_offsets = {}
+            all_clients = list(BERKELEY_CLIENTS.items()) + [(name, ctrl.url) for name, ctrl in self.controllers.items()]
+
+            logger.info(f"[BERKELEY-STEP2-3] Broadcasting time to {len(all_clients)} clients")
+            for client_name, client_url in all_clients:
+                if client_name == time_server_controller:
+                    client_offsets[client_name] = 0.0
+                    logger.info(f"[BERKELEY-STEP3] {client_name} (time server) offset: 0.00s")
+                    continue
+
+                try:
+                    proxy = ServerProxy(client_url, allow_none=True,
+                                        transport=TimeoutTransport(RESPONSE_TIMEOUT))
+                    client_offset = proxy.get_clock_value(server_time)
+                    client_offsets[client_name] = float(client_offset)
+                    logger.info(f"[BERKELEY-STEP3] {client_name} offset: {client_offset:+.2f}s")
+                except Exception as e:
+                    logger.warning(f"[BERKELEY-STEP3] Failed to get offset from {client_name}: {e}")
+                    client_offsets[client_name] = 0.0
+
+            # Step 4: Calculate average offset
+            avg_offset = sum(client_offsets.values()) / len(client_offsets)
+            new_time = server_time + avg_offset
+            logger.info(f"[BERKELEY-STEP4] Average offset: {avg_offset:+.2f}s, New synchronized time: {new_time}")
+
+            # Step 5-7: Set new time on all clients
+            logger.info(f"[BERKELEY-STEP5-7] Setting synchronized time on all clients")
+            for client_name, client_url in all_clients:
+                try:
+                    proxy = ServerProxy(client_url, allow_none=True,
+                                        transport=TimeoutTransport(RESPONSE_TIMEOUT))
+                    proxy.set_time(new_time)
+                    logger.info(f"[BERKELEY-STEP7] {client_name} synchronized successfully")
+                except Exception as e:
+                    logger.warning(f"[BERKELEY-STEP7] Failed to sync {client_name}: {e}")
+
+            logger.info(f"[BERKELEY] 7-step synchronization COMPLETED")
+            return "SYNC_COMPLETE"
+
+        except Exception as e:
+            logger.error(f"[BERKELEY] Synchronization FAILED: {e}")
+            return "SYNC_FAILED"
+
+    # ====== LOAD BALANCING ======
+    def get_least_loaded_controller(self):
+        """Get controller with lowest load (proper dynamic calculation)"""
+        with self.lock:
+            if not self.controllers:
+                return None
+
+            # Calculate detailed load for each controller
+            controller_loads = []
+            for name, controller in self.controllers.items():
+                current_load = controller.get_load()
+                total_processed = controller.total_processed
+                availability_score = 1.0 if controller.is_available else 0.0
+
+                # Combined score: lower is better
+                combined_score = (current_load * 2) + (total_processed * 0.1) + (1.0 - availability_score) * 100
+                controller_loads.append((combined_score, current_load, total_processed, name, controller))
+
+                logger.debug(
+                    f"[LOAD-BALANCE] {name}: load={current_load}, processed={total_processed}, score={combined_score:.2f}")
+
+            # Sort by combined score
+            controller_loads.sort(key=lambda x: x[0])
+
+            selected = controller_loads[0][4]
+            logger.info(
+                f"[LOAD-BALANCE] Selected {selected.name} (active: {selected.get_load()}, total: {selected.total_processed})")
+            return selected
+
+    # ====== GFS REPLICA MANAGEMENT (COMPLETE IMPLEMENTATION) ======
+    def request_data_access(self, client_id, data_type, operation_type, retry_count=0):
+        """Handle RTO data access with complete chunk metadata and limited retries"""
+        max_retries = 10  # Prevent infinite recursion
+
+        if retry_count >= max_retries:
+            logger.error(f"[GFS-ACCESS] Max retries ({max_retries}) exceeded for {client_id}")
+            return {'access_granted': False, 'reason': f'Max retries exceeded after {max_retries} attempts'}
+
+        logger.info(
+            f"[GFS-ACCESS] {client_id} requesting {operation_type.upper()} access for {data_type} (attempt {retry_count + 1})")
+
+        # Always generate complete metadata first
+        metadata = self.replica_manager.get_chunk_metadata(data_type)
+
+        if operation_type == "read":
+            server = self.replica_manager.acquire_read_access(data_type, client_id)
+            if server:
+                server_info = REPLICA_SERVERS[server]
+
+                access_response = {
+                    'access_granted': True,
+                    'server_name': server,
+                    'server_url': server_info['url'],
+                    'chunks': metadata['chunk_distribution'],
+                    'metadata': metadata,
+                    'operation_type': 'read',
+                    'client_id': client_id,
+                    'timestamp': time.time(),
+                    'retry_count': retry_count
+                }
+
+                logger.info(
+                    f"[GFS-ACCESS] READ granted to {client_id} on {server} - {metadata['total_chunks']} chunks available")
+                return access_response
+            else:
+                # Limited retry mechanism
+                logger.warning(
+                    f"[GFS-ACCESS] READ access delayed for {client_id}, retrying... (attempt {retry_count + 1}/{max_retries})")
+                time.sleep(0.5)
+                return self.request_data_access(client_id, data_type, operation_type, retry_count + 1)
+
+        elif operation_type == "write":
+            servers = self.replica_manager.acquire_write_access(data_type, client_id)
+            if servers:
+                access_response = {
+                    'access_granted': True,
+                    'locked_servers': servers,
+                    'metadata': metadata,
+                    'operation_type': 'write',
+                    'client_id': client_id,
+                    'timestamp': time.time(),
+                    'retry_count': retry_count
+                }
+
+                logger.info(
+                    f"[GFS-ACCESS] WRITE granted to {client_id} on {len(servers)} servers - {metadata['total_chunks']} chunks to update")
+                return access_response
+            else:
+                # Limited retry mechanism
+                logger.warning(
+                    f"[GFS-ACCESS] WRITE access delayed for {client_id}, retrying... (attempt {retry_count + 1}/{max_retries})")
+                time.sleep(1.0)  # Longer wait for writes
+                return self.request_data_access(client_id, data_type, operation_type, retry_count + 1)
+
+        # Fallback - should never reach here
+        logger.error(f"[GFS-ACCESS] Invalid operation type: {operation_type}")
+        return {'access_granted': False, 'reason': 'Invalid operation type'}
+
+    def release_data_access(self, client_id, resource_identifier, operation_type):
+        """Release data access - handles both server names and server lists"""
+        logger.info(f"[GFS-RELEASE] {client_id} releasing {operation_type.upper()} lock on {resource_identifier}")
+
+        try:
+            if operation_type == "read":
+                if isinstance(resource_identifier, str):
+                    server_name = resource_identifier
+                    self.replica_manager.release_read_access(server_name, client_id)
+                    return "OK"
+                else:
+                    logger.error(f"[GFS-RELEASE] Invalid server identifier for READ: {resource_identifier}")
+                    return "ERROR"
+
+            elif operation_type == "write":
+                if isinstance(resource_identifier, list):
+                    servers = resource_identifier
+                    self.replica_manager.release_write_access(servers, client_id)
+                    return "OK"
+                elif isinstance(resource_identifier, str):
+                    # Handle single server name (convert to list)
+                    servers = [resource_identifier] if resource_identifier in REPLICA_SERVERS else list(
+                        REPLICA_SERVERS.keys())
+                    self.replica_manager.release_write_access(servers, client_id)
+                    return "OK"
+                else:
+                    logger.error(f"[GFS-RELEASE] Invalid server identifier for WRITE: {resource_identifier}")
+                    return "ERROR"
+
             return "OK"
         except Exception as e:
-            print(f"[ZOOKEEPER] Berkeley sync initiation failed: {e}")
-            return "FAIL"
-
-    def get_client_list(self):
-        """Provide client list for Berkeley sync"""
-        return self.clients
-    def debug_system_status(self):
-        """Debug method to check system status"""
-        print("[DEBUG] System Status:")
-        print(f"[DEBUG] Controllers: {list(self.controllers.keys())}")
-        for name, controller in self.controllers.items():
-            print(f"[DEBUG] {name}: available={controller.is_available}, buffer={len(controller.active_requests)}")
-        print(f"[DEBUG] Replica manager initialized: {hasattr(self, 'replica_manager')}")
-        return "Debug complete"
-
-    # Add these new RPC methods
-    def request_data_access(self, client_id, data_type, operation_type):
-        """Handle RTO officer data access requests"""
-        print(f"[ZOOKEEPER] Data access request from {client_id}: {data_type} ({operation_type})")
-
-        if operation_type == "read":
-            # Get available server for reading
-            server_name = self.replica_manager.get_available_read_server(data_type)
-            if server_name:
-                if self.replica_manager.acquire_read_lock(server_name):
-                    chunks = self.replica_manager.get_chunk_info(data_type)
-                    replica = self.replica_manager.replicas[server_name]
-                    return {
-                        'access_granted': True,
-                        'server_name': server_name,
-                        'server_url': f"http://localhost:7001",  # Replica server port
-                        'chunks': chunks,
-                        'data_type': data_type
-                    }
-            return {'access_granted': False, 'reason': 'No servers available for reading'}
-
-        elif operation_type == "write":
-            # Try to acquire write lock on all replicas
-            locked_servers = self.replica_manager.acquire_write_lock(data_type)
-            if locked_servers:
-                return {
-                    'access_granted': True,
-                    'locked_servers': locked_servers,
-                    'data_type': data_type
-                }
-            return {'access_granted': False, 'reason': 'Write lock unavailable - readers active'}
-
-    def get_chunk_metadata(self, data_type):
-        """Get chunk metadata using hashmap"""
-        return self.replica_manager.get_chunk_metadata(data_type)
-
-    def get_hash_ring_status(self):
-        """Get hash ring status for debugging"""
-        return {
-            'server_load': self.replica_manager.hash_manager.get_server_load(),
-            'ring_size': len(self.replica_manager.hash_manager.ring),
-            'virtual_nodes_per_server': self.replica_manager.hash_manager.virtual_nodes
-        }
-    def release_data_access(self, client_id, server_name, operation_type):
-        """Release data access locks"""
-        if operation_type == "read":
-            self.replica_manager.release_read_lock(server_name)
-        elif operation_type == "write":
-            self.replica_manager.release_write_lock([server_name])
-
-        return "OK"
+            logger.error(f"[GFS-RELEASE] Failed to release {operation_type} access for {client_id}: {e}")
+            return "ERROR"
 
     def write_data(self, client_id, locked_servers, operation, *args, **kwargs):
-        """Perform write operation on all replicas"""
-        results = self.replica_manager.replicate_write(locked_servers, operation, *args, **kwargs)
-        self.replica_manager.release_write_lock(locked_servers)
-        return results
-    def log_separator(self, title="", char="=", width=70):
-        if title:
-            padding = (width - len(title) - 2) // 2
-            print(f"\n{char * padding} {title} {char * padding}")
+        """Perform replicated write operation with verification"""
+        logger.info(f"[GFS-WRITE] {client_id} performing {operation} on {len(locked_servers)} replicas")
+        logger.info(f"[GFS-WRITE] Write data: {args[:1]}...")  # Log first arg only to avoid spam
+
+        results = self.replica_manager.replicate_write(locked_servers, operation, client_id, *args, **kwargs)
+
+        # Verify write success
+        successful_writes = sum(1 for result in results.values() if result == "OK")
+        total_replicas = len(locked_servers)
+
+        if successful_writes == total_replicas:
+            logger.info(f"[GFS-WRITE] {client_id} write operation SUCCESSFUL on all {total_replicas} replicas")
+        elif successful_writes >= (total_replicas // 2 + 1):
+            logger.warning(
+                f"[GFS-WRITE] {client_id} write operation PARTIAL SUCCESS: {successful_writes}/{total_replicas}")
         else:
-            print(f"\n{char * width}")
+            logger.error(
+                f"[GFS-WRITE] {client_id} write operation FAILED: only {successful_writes}/{total_replicas} succeeded")
 
-    def get_available_controller(self) -> ControllerState:
-        """Enhanced controller selection with dynamic scaling"""
-        with self.lock:
-            # First: Find completely free controllers
-            free_controllers = [c for c in self.controllers.values()
-                                if c.is_free() and len(c.active_requests) == 0]
-            if free_controllers:
-                controller = min(free_controllers, key=lambda c: c.total_processed)
-                print(f"[ZOOKEEPER] Selected {controller.name} (completely free)")
-                return controller
+        # Auto-release write locks after operation
+        self.replica_manager.release_write_access(locked_servers, client_id)
 
-            # Second: Find controllers with buffer space
-            available_controllers = [c for c in self.controllers.values() if c.is_free()]
-            if available_controllers:
-                controller = min(available_controllers, key=lambda c: len(c.active_requests))
-                print(f"[ZOOKEEPER] Selected {controller.name} (buffer: {len(controller.active_requests)}/{BUFFER_SIZE})")
-                return controller
+        return {
+            'results': results,
+            'successful_writes': successful_writes,
+            'total_replicas': total_replicas,
+            'success_rate': (successful_writes / total_replicas) * 100,
+            'status': 'COMPLETE'
+        }
 
-            # Third: Try to create dynamic clone
-            print(f"[ZOOKEEPER] All controllers busy! Attempting dynamic scaling...")
-            clone_name, clone_url = self.clone_manager.create_dynamic_clone()
-            if clone_name and clone_url:
-                new_controller = ControllerState(clone_name, clone_url, is_dynamic=True)
-                self.controllers[clone_name] = new_controller
-                self.db.update_controller_status(
-                    clone_name, url=clone_url, is_available=True, active_requests=0,
-                    buffer_size=BUFFER_SIZE, total_processed=0, is_dynamic=True
-                )
-                print(f"[ZOOKEEPER] Dynamic scaling successful! Created {clone_name}")
-                return new_controller
+    def get_chunk_metadata(self, data_type):
+        """Get complete chunk metadata for RTO clients"""
+        logger.info(f"[GFS-METADATA] Generating chunk metadata for {data_type}")
+        metadata = self.replica_manager.get_chunk_metadata(data_type)
+        logger.info(
+            f"[GFS-METADATA] Generated metadata: {metadata['total_chunks']} chunks, {metadata['replication_factor']} replicas each")
+        return metadata
 
-            # Fallback: Use least busy controller
-            controller = min(self.controllers.values(), key=lambda c: len(c.active_requests))
-            print(f"[ZOOKEEPER] Using overloaded controller {controller.name}")
-            return controller
+    # ====== MAIN RPC METHODS ======
+    def signal_request(self, client_id, target_pair, request_type="normal"):
+        """Handle signal requests from t_signal"""
+        logger.info(f"[TRAFFIC-SIGNAL] Request from {client_id}: {target_pair} ({request_type})")
 
-    def forward_request(self, method_name: str, *args, **kwargs):
-        """Enhanced request forwarding with database logging"""
+        controller = self.get_least_loaded_controller()
+        if not controller:
+            return {"success": False, "reason": "No controllers available"}
+
+        controller.add_request()
         request_id = str(uuid.uuid4())[:8]
-        start_time = time.time()
-
-        self.log_separator(f"LOAD BALANCER: {method_name.upper()}")
-        print(f"[ZOOKEEPER] Request {request_id}: {method_name}{args}")
-
-        controller = self.get_available_controller()
-        controller.add_request(request_id)
-
-        # Log request start
-        self.db.log_request(request_id, method_name, args[0] if args else "",
-                            controller.name, start_time)
 
         try:
             proxy = ServerProxy(controller.url, allow_none=True,
                                 transport=TimeoutTransport(RESPONSE_TIMEOUT))
-            method = getattr(proxy, method_name)
-            result = method(*args, **kwargs)
+            result = proxy.signal_controller(target_pair)
 
-            end_time = time.time()
-            response_time = end_time - start_time
+            controller.complete_request()
+            logger.info(f"[TRAFFIC-SIGNAL] Request {request_id} completed by {controller.name}")
 
-            print(f"[ZOOKEEPER] {controller.name} completed {request_id} in {response_time:.2f}s")
-
-            # Update database
-            controller.complete_request(request_id)
-            self.db.log_request(request_id, method_name, args[0] if args else "",
-                                controller.name, start_time, end_time, "completed")
-            self.db.update_controller_status(controller.name,
-                                             active_requests=len(controller.active_requests),
-                                             total_processed=controller.total_processed)
-
-            return result
+            return {"success": True, "controller": controller.name, "result": result, "request_id": request_id}
 
         except Exception as e:
-            end_time = time.time()
-            print(f"[ZOOKEEPER] Error with {controller.name}: {e}")
-            controller.complete_request(request_id)
-            controller.is_available = True
-            self.db.log_request(request_id, method_name, args[0] if args else "",
-                                controller.name, start_time, end_time, "failed")
+            controller.complete_request()
+            logger.error(f"[TRAFFIC-SIGNAL] Request {request_id} failed on {controller.name}: {e}")
+            return {"success": False, "reason": str(e), "request_id": request_id}
 
-            # Retry with another controller
-            return self.forward_request(method_name, *args, **kwargs)
+    def vip_arrival(self, client_id, target_pair, priority=1, vehicle_id=None):
+        """Handle VIP requests with proper deadlock resolution"""
+        vehicle_id = vehicle_id or f"VIP_{uuid.uuid4().hex[:6]}"
+        logger.info(f"[VIP-ARRIVAL] {client_id}: VIP {vehicle_id} (P{priority}) requesting {target_pair}")
 
-    # RPC Methods
-    def signal_controller(self, target_pair):
-        return self.forward_request("signal_controller", target_pair)
+        # Determine which direction group this VIP belongs to
+        pair_key = "12" if target_pair in [[1, 2], [2, 1]] else "34"
+        other_key = "34" if pair_key == "12" else "12"
 
-    def vip_arrival(self, target_pair, priority=1, vehicle_id=None):
-        return self.forward_request("vip_arrival", target_pair, priority, vehicle_id)
+        vip_info = {
+            'vehicle_id': vehicle_id,
+            'priority': priority,
+            'target_pair': target_pair,
+            'timestamp': time.time(),
+            'client_id': client_id
+        }
 
+        # Add to pending queue
+        self.pending_vip_requests[pair_key].append(vip_info)
+
+        # Check for deadlock scenario
+        deadlock_resolved = False
+        if self.pending_vip_requests["12"] and self.pending_vip_requests["34"]:
+            logger.warning(f"[VIP-DEADLOCK] Simultaneous VIP requests detected!")
+
+            vip_12 = self.pending_vip_requests["12"][0]
+            vip_34 = self.pending_vip_requests["34"][0]
+
+            first_vip, second_vip = self.handle_vip_deadlock(vip_12, vip_34)
+            deadlock_resolved = True
+
+            # Process in order
+            if first_vip == vip_info:
+                logger.info(f"[VIP-DEADLOCK] {vehicle_id} selected to go FIRST")
+            else:
+                logger.info(f"[VIP-DEADLOCK] {vehicle_id} will go SECOND, waiting...")
+                time.sleep(3)  # Wait for first VIP to complete
+
+        # Assign to least loaded controller
+        controller = self.get_least_loaded_controller()
+        controller.add_request()
+        request_id = str(uuid.uuid4())[:8]
+
+        try:
+            proxy = ServerProxy(controller.url, allow_none=True,
+                                transport=TimeoutTransport(RESPONSE_TIMEOUT))
+            result = proxy.vip_arrival(target_pair, priority, vehicle_id)
+
+            controller.complete_request()
+
+            # Remove from pending queue
+            if self.pending_vip_requests[pair_key] and self.pending_vip_requests[pair_key][0][
+                'vehicle_id'] == vehicle_id:
+                self.pending_vip_requests[pair_key].pop(0)
+
+            logger.info(f"[VIP-ARRIVAL] VIP {vehicle_id} request completed by {controller.name}")
+
+            return {
+                "success": True,
+                "controller": controller.name,
+                "result": result,
+                "vehicle_id": vehicle_id,
+                "deadlock_resolved": deadlock_resolved,
+                "request_id": request_id
+            }
+
+        except Exception as e:
+            controller.complete_request()
+            logger.error(f"[VIP-ARRIVAL] VIP {vehicle_id} failed on {controller.name}: {e}")
+
+            # Remove from queue on failure
+            if self.pending_vip_requests[pair_key] and self.pending_vip_requests[pair_key][0][
+                'vehicle_id'] == vehicle_id:
+                self.pending_vip_requests[pair_key].pop(0)
+
+            return {"success": False, "reason": str(e), "vehicle_id": vehicle_id, "request_id": request_id}
+
+    def get_current_green_pair(self):
+        """Get currently green signal pair from database"""
+        signals = self.db.get_signal_status()
+        if signals.get('3') == 'GREEN' and signals.get('4') == 'GREEN':
+            return [3, 4]
+        elif signals.get('1') == 'GREEN' and signals.get('2') == 'GREEN':
+            return [1, 2]
+        return [3, 4]  # Default
+
+    # ====== UTILITY METHODS ======
     def ping(self):
-        return "ZooKeeper OK"
+        active_controllers = sum(1 for c in self.controllers.values() if c.is_available)
+        return f"ZooKeeper OK - {active_controllers} controllers active"
 
     def get_system_status(self):
-        """RPC method for external clients to read system status"""
-        return self.db.get_system_stats()
+        """Enhanced system status with GFS and RA info"""
+        base_stats = self.db.get_system_stats()
+
+        # Add GFS status
+        gfs_status = {
+            'active_reads': dict(self.replica_manager.active_reads),
+            'active_writes': dict(self.replica_manager.active_writes),
+            'replica_servers': list(REPLICA_SERVERS.keys()),
+            'total_replicas': len(REPLICA_SERVERS)
+        }
+
+        # Add controller load info
+        controller_status = {}
+        for name, controller in self.controllers.items():
+            controller_status[name] = {
+                'active_requests': controller.get_load(),
+                'total_processed': controller.total_processed,
+                'is_available': controller.is_available
+            }
+
+        base_stats.update({
+            'gfs_status': gfs_status,
+            'controller_loads': controller_status,
+            'pending_vips': {k: len(v) for k, v in self.pending_vip_requests.items()},
+            'lamport_clock': self.lamport_clock
+        })
+
+        return base_stats
 
     def update_signal_status(self, signal_status):
-        """RPC method for controllers to update signal status"""
+        """Update signal status in database"""
         self.db.update_signal_status(signal_status)
+        logger.info(f"[DB-UPDATE] Signal status updated: {signal_status}")
         return "OK"
 
     def get_signal_status(self):
-        """RPC method to get current signal status"""
+        """Get current signal status from database"""
         return self.db.get_signal_status()
 
+    def get_client_list(self):
+        """For Berkeley sync coordination"""
+        return BERKELEY_CLIENTS
 
 
-    def request_data_access(self, client_id, data_type, operation_type):
-        """Handle RTO officer data access requests with Reader-Writer logic"""
-        self.log_separator(f"DATA ACCESS REQUEST: {client_id}")
-        print(f"[ZOOKEEPER] Request from {client_id}: {data_type} ({operation_type})")
-
-        if operation_type == "read":
-            # Get available server for reading
-            server_name = self.replica_manager.get_available_read_server(data_type)
-            if server_name:
-                if self.replica_manager.acquire_read_lock(server_name):
-                    chunks = self.replica_manager.get_chunk_info(data_type)
-                    # Map server names to actual ports
-                    port_mapping = {'server_1': 7001, 'server_2': 7002, 'server_3': 7003}
-                    server_port = port_mapping.get(server_name, 7001)
-
-                    print(f"[ZOOKEEPER] READ access granted to {client_id} on {server_name}")
-                    return {
-                        'access_granted': True,
-                        'server_name': server_name,
-                        'server_url': f"http://localhost:{server_port}",
-                        'chunks': chunks,
-                        'data_type': data_type,
-                        'client_id': client_id
-                    }
-
-            print(f"[ZOOKEEPER] READ access denied to {client_id} - No servers available")
-            return {'access_granted': False, 'reason': 'No servers available for reading'}
-
-        elif operation_type == "write":
-            # Try to acquire write lock on all replicas
-            locked_servers = self.replica_manager.acquire_write_lock(data_type)
-            if locked_servers:
-                print(f"[ZOOKEEPER] WRITE access granted to {client_id} on {locked_servers}")
-                return {
-                    'access_granted': True,
-                    'locked_servers': locked_servers,
-                    'data_type': data_type,
-                    'client_id': client_id
-                }
-
-            print(f"[ZOOKEEPER] WRITE access denied to {client_id} - Writer active or readers present")
-            return {'access_granted': False, 'reason': 'Write lock unavailable - readers active or writer present'}
-
-    def release_data_access(self, client_id, server_name, operation_type):
-        """Release data access locks"""
-        print(f"[ZOOKEEPER] {client_id} releasing {operation_type} lock on {server_name}")
-
-        if operation_type == "read":
-            self.replica_manager.release_read_lock(server_name)
-        elif operation_type == "write":
-            self.replica_manager.release_write_lock([server_name])
-
-        return "OK"
-
-    def write_data(self, client_id, locked_servers, operation, *args, **kwargs):
-        """Perform write operation on all replicas"""
-        print(f"[ZOOKEEPER] {client_id} performing write operation: {operation}")
-
-        results = self.replica_manager.replicate_write(locked_servers, operation, *args, **kwargs)
-        self.replica_manager.release_write_lock(locked_servers)
-
-        print(f"[ZOOKEEPER] Write operation completed on {len(locked_servers)} replicas")
-        return results
-
-class DataReplicaManager:
-    def __init__(self, db_path_prefix="replica"):
-        self.replicas = {}
-        self.metadata_lock = threading.Lock()
-        self.chunk_size = 5  # 5 records per chunk
-        self.replica_count = 3  # 3 replicas for each data type
-
-        # Initialize hash manager
-        replica_names = [f"server_{i + 1}" for i in range(self.replica_count)]
-        self.hash_manager = ConsistentHashManager(replica_names)
-
-        # Initialize 3 replica databases
-        for i in range(self.replica_count):
-            replica_name = f"server_{i + 1}"
-            replica_path = f"{db_path_prefix}_{i + 1}.db"
-            self.replicas[replica_name] = {
-                'db_path': replica_path,
-                'db_manager': DatabaseManager(replica_path),
-                'readers_count': 0,
-                'writer_active': False,
-                'lock': threading.Lock(),
-                'chunks': {}  # chunk_id -> data
-            }
-
-        print(f"[REPLICA-MANAGER] Initialized {self.replica_count} replicas with consistent hashing")
-
-    def get_chunk_info(self, data_type):
-        """Get chunk information using hashmap"""
-        # Get data from first replica to calculate chunks
-        replica = self.replicas['server_1']
-        if data_type == "signal_status":
-            data = replica['db_manager'].get_signal_status()
-        elif data_type == "controller_status":
-            stats = replica['db_manager'].get_system_stats()
-            data = {f"controller_{i}": ctrl for i, ctrl in enumerate(stats.get('controllers', []))}
-        else:
-            data = {}
-
-        # Use hash manager to create chunks
-        chunks = self.hash_manager.map_data_to_chunks(data_type, data)
-
-        return {
-            'total_chunks': len(chunks),
-            'chunk_size': self.chunk_size,
-            'chunk_distribution': {chunk_id: info['servers'] for chunk_id, info in chunks.items()}
-        }
-
-    def get_available_read_server(self, data_type):
-        """Get an available server for reading (Reader-Writer algorithm)"""
-        available_servers = []
-
-        for server_name, replica in self.replicas.items():
-            with replica['lock']:
-                if not replica['writer_active']:  # No writer active
-                    available_servers.append(server_name)
-
-        return available_servers[0] if available_servers else None
-
-    def get_available_read_server_for_chunk(self, data_type, chunk_id=None):
-        """Get available server for reading specific chunk using hashmap"""
-        if chunk_id:
-            # Get servers responsible for this specific chunk
-            chunk_key = f"{data_type}_chunk_{chunk_id}"
-            responsible_servers = self.hash_manager.get_chunk_locations(chunk_key)
-            if not responsible_servers:
-                responsible_servers = list(self.replicas.keys())
-        else:
-            # Any server can handle full data requests
-            responsible_servers = list(self.replicas.keys())
-
-        # Find available server from responsible ones
-        for server_name in responsible_servers:
-            replica = self.replicas[server_name]
-            with replica['lock']:
-                if not replica['writer_active']:  # No writer active
-                    return server_name
-
-        return None
-
-    def get_chunk_metadata(self, data_type):
-        """Get detailed chunk metadata using hashmap"""
-        chunks_info = self.get_chunk_info(data_type)
-        server_load = self.hash_manager.get_server_load()
-
-        return {
-            'data_type': data_type,
-            'total_chunks': chunks_info['total_chunks'],
-            'chunk_size': self.chunk_size,
-            'chunk_distribution': chunks_info['chunk_distribution'],
-            'server_load': server_load,
-            'hash_ring_info': {
-                'virtual_nodes_per_server': self.hash_manager.virtual_nodes,
-                'total_virtual_nodes': len(self.hash_manager.ring)
-            }
-        }
-    def acquire_read_lock(self, server_name):
-        """Acquire read lock on a server"""
-        replica = self.replicas[server_name]
-        with replica['lock']:
-            if not replica['writer_active']:
-                replica['readers_count'] += 1
-                return True
-        return False
-
-    def release_read_lock(self, server_name):
-        """Release read lock on a server"""
-        replica = self.replicas[server_name]
-        with replica['lock']:
-            replica['readers_count'] = max(0, replica['readers_count'] - 1)
-
-    def acquire_write_lock(self, data_type):
-        """Acquire write lock on all replicas for a data type"""
-        locked_servers = []
-
-        for server_name, replica in self.replicas.items():
-            with replica['lock']:
-                if replica['readers_count'] == 0 and not replica['writer_active']:
-                    replica['writer_active'] = True
-                    locked_servers.append(server_name)
-                else:
-                    # Rollback locks if can't get all
-                    for locked_server in locked_servers:
-                        self.replicas[locked_server]['writer_active'] = False
-                    return None
-
-        return locked_servers
-
-    def release_write_lock(self, server_names):
-        """Release write lock on all servers"""
-        for server_name in server_names:
-            replica = self.replicas[server_name]
-            with replica['lock']:
-                replica['writer_active'] = False
-
-    def replicate_write(self, server_names, operation, *args, **kwargs):
-        """Perform write operation on all replicas"""
-        results = []
-        from xmlrpc.client import ServerProxy
-        for server_name in server_names:
-            port_mapping = {'server_1': 7001, 'server_2': 7002, 'server_3': 7003}
-            proxy = ServerProxy(f"http://localhost:{port_mapping[server_name]}", allow_none=True)
-
-            if operation == "update_signal_status":
-                proxy.update_signal_status(*args, **kwargs)
-            elif operation == "update_controller_status":
-                proxy.update_controller_status(*args, **kwargs)
-            # Add more operations as needed
-
-            results.append(f"{server_name}: success")
-
-        return results
-
-
-class ConsistentHashManager:
-    def __init__(self, replica_servers, virtual_nodes=3):
-        self.replica_servers = replica_servers  # ['server_1', 'server_2', 'server_3']
-        self.virtual_nodes = virtual_nodes
-        self.ring = {}  # Hash ring
-        self.chunk_map = {}  # chunk_id -> [server1, server2, server3]
-        self.server_chunks = {}  # server -> [chunk_ids]
-        self._build_ring()
-
-    def _hash(self, key):
-        """Generate hash for a key"""
-        return int(hashlib.md5(key.encode()).hexdigest(), 16)
-
-    def _build_ring(self):
-        """Build the consistent hash ring"""
-        self.ring = {}
-        for server in self.replica_servers:
-            for i in range(self.virtual_nodes):
-                virtual_key = f"{server}:{i}"
-                hash_value = self._hash(virtual_key)
-                self.ring[hash_value] = server
-
-        # Sort the ring
-        self.sorted_hashes = sorted(self.ring.keys())
-        print(f"[HASH-MANAGER] Built hash ring with {len(self.ring)} virtual nodes")
-
-    def get_servers_for_chunk(self, chunk_id, replication_factor=3):
-        """Get servers responsible for a chunk using consistent hashing"""
-        chunk_hash = self._hash(str(chunk_id))
-
-        # Find the position in the ring
-        servers = []
-        for hash_value in self.sorted_hashes:
-            if hash_value >= chunk_hash:
-                server = self.ring[hash_value]
-                if server not in servers:
-                    servers.append(server)
-                if len(servers) >= replication_factor:
-                    break
-
-        # Wrap around if needed
-        if len(servers) < replication_factor:
-            for hash_value in self.sorted_hashes:
-                server = self.ring[hash_value]
-                if server not in servers:
-                    servers.append(server)
-                if len(servers) >= replication_factor:
-                    break
-
-        return servers[:replication_factor]
-
-    def map_data_to_chunks(self, data_type, data_items):
-        """Map data items to chunks and assign servers"""
-        chunk_size = 5  # items per chunk
-        chunks = {}
-        chunk_id = 0
-
-        items_list = list(data_items.items()) if isinstance(data_items, dict) else list(data_items)
-
-        # Group items into chunks
-        for i in range(0, len(items_list), chunk_size):
-            chunk_data = items_list[i:i + chunk_size]
-            chunk_key = f"{data_type}_chunk_{chunk_id}"
-
-            # Get servers for this chunk
-            responsible_servers = self.get_servers_for_chunk(chunk_key)
-
-            chunks[chunk_key] = {
-                'chunk_id': chunk_id,
-                'data': chunk_data,
-                'servers': responsible_servers,
-                'data_type': data_type
-            }
-
-            # Update chunk mapping
-            self.chunk_map[chunk_key] = responsible_servers
-
-            # Update server chunks mapping
-            for server in responsible_servers:
-                if server not in self.server_chunks:
-                    self.server_chunks[server] = []
-                self.server_chunks[server].append(chunk_key)
-
-            chunk_id += 1
-
-        print(f"[HASH-MANAGER] Mapped {len(items_list)} {data_type} items to {len(chunks)} chunks")
-        return chunks
-
-    def get_chunk_locations(self, chunk_id):
-        """Get all server locations for a chunk"""
-        chunk_key = f"chunk_{chunk_id}" if not chunk_id.startswith("chunk_") else chunk_id
-        return self.chunk_map.get(chunk_key, [])
-
-    def get_server_load(self):
-        """Get load distribution across servers"""
-        load_info = {}
-        for server in self.replica_servers:
-            chunk_count = len(self.server_chunks.get(server, []))
-            load_info[server] = {
-                'chunk_count': chunk_count,
-                'chunks': self.server_chunks.get(server, [])
-            }
-        return load_info
 if __name__ == "__main__":
-    print("=" * 35)
-    print("ENHANCED ZOOKEEPER LOAD BALANCER")
-    print("=" * 35)
-    print(f"Buffer size: {BUFFER_SIZE} | Max dynamic clones: {MAX_DYNAMIC_CLONES}")
-    print(f"Database: {DB_PATH}")
+    logger.info("=" * 80)
+    logger.info("COMPLETE ENHANCED ZOOKEEPER LOAD BALANCER")
+    logger.info("Features: Ricart-Agrawala | Berkeley 7-Step | GFS Replicas | VIP Deadlock")
+    logger.info("=" * 80)
 
     lb = ZooKeeperLoadBalancer()
 
-    # Start health check
-    #health_thread = threading.Thread(target=lb.health_check_loop, daemon=True)
-    #health_thread.start()
-
-    # Start RPC server
     server = SimpleXMLRPCServer(("0.0.0.0", ZOOKEEPER_PORT), allow_none=True)
-    server.register_function(lb.signal_controller, "signal_controller")
+
+    # Traffic control
+    server.register_function(lb.signal_request, "signal_request")
     server.register_function(lb.vip_arrival, "vip_arrival")
+
+    # Ricart-Agrawala
+    server.register_function(lb.forward_ra_request, "forward_ra_request")
+    server.register_function(lb.forward_ra_response, "forward_ra_response")
+    server.register_function(lb.request_ped_ack, "request_ped_ack")
+
+    # Berkeley sync
+    server.register_function(lb.coordinate_berkeley_sync, "coordinate_berkeley_sync")
+    server.register_function(lb.get_client_list, "get_client_list")
+
+    # GFS replica management
+    server.register_function(lb.request_data_access, "request_data_access")
+    server.register_function(lb.release_data_access, "release_data_access")
+    server.register_function(lb.write_data, "write_data")
+    server.register_function(lb.get_chunk_metadata, "get_chunk_metadata")
+
+    # Utility
     server.register_function(lb.ping, "ping")
     server.register_function(lb.get_system_status, "get_system_status")
     server.register_function(lb.update_signal_status, "update_signal_status")
     server.register_function(lb.get_signal_status, "get_signal_status")
-    # In the main section, add these registrations:
-    server.register_function(lb.request_data_access, "request_data_access")
-    server.register_function(lb.release_data_access, "release_data_access")
-    server.register_function(lb.write_data, "write_data")
-    # Add to server registration in trial_zookeeper.py main section:
-    server.register_function(lb.get_chunk_metadata, "get_chunk_metadata")
-    server.register_function(lb.get_hash_ring_status, "get_hash_ring_status")
-    # Register it:
-    server.register_function(lb.debug_system_status, "debug_system_status")
-    print(f"Enhanced ZooKeeper ready on port {ZOOKEEPER_PORT}")
-    print("Features: Dynamic Scaling | Database | Performance Optimized")
+
+    logger.info(f"ZooKeeper ready on port {ZOOKEEPER_PORT}")
 
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nZooKeeper shutting down...")
+        logger.info("ZooKeeper shutting down...")
+        logger.info("=" * 80)

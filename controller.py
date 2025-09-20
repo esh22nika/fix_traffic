@@ -82,6 +82,7 @@ def request_critical_section(target_pair, request_type="normal", requester_info=
 
         ra_state['requesting_cs'] = True
         ra_state['received_oks'] = 0
+        ra_state['expected_oks'] = 2  # controller_clone + p_signal
         timestamp = increment_lamport_clock()
         ra_state['pending_request'] = {
             'timestamp': timestamp,
@@ -90,23 +91,23 @@ def request_critical_section(target_pair, request_type="normal", requester_info=
             'requester_info': requester_info
         }
 
-    # Send RA request to other controllers via ZooKeeper
+    # Send RA request to other nodes via ZooKeeper
     try:
         zk_proxy = get_zookeeper_proxy()
-        other_controllers = ["controller_clone"]  # Add dynamic clones later
+        other_nodes = ["controller_clone", "p_signal"]  # Both nodes for RA
 
-        for other_controller in other_controllers:
+        for node in other_nodes:
             response = zk_proxy.forward_ra_request(
-                CONTROLLER_NAME, other_controller, timestamp, target_pair, request_type
+                CONTROLLER_NAME, node, timestamp, target_pair, request_type
             )
-            print(f"[{CONTROLLER_NAME}] RA request to {other_controller}: {response}")
+            print(f"[{CONTROLLER_NAME}] RA request to {node}: {response}")
     except Exception as e:
         print(f"[{CONTROLLER_NAME}] RA request failed: {e}")
         with ra_lock:
             ra_state['requesting_cs'] = False
         return False
 
-    # Wait for all OKs
+    # Wait for all OKs (2 total: controller_clone + p_signal)
     while True:
         with ra_lock:
             if ra_state['received_oks'] >= ra_state['expected_oks']:
@@ -247,7 +248,8 @@ def signal_controller(target_pair):
 
     try:
         # Initiate Berkeley sync while in CS
-        berkeley_cycle_once()
+        zk_proxy = get_zookeeper_proxy()
+        zk_proxy.coordinate_berkeley_sync(CONTROLLER_NAME)
 
         # Get pedestrian acknowledgment via ZooKeeper
         zk_proxy = get_zookeeper_proxy()
@@ -283,10 +285,11 @@ def vip_arrival(target_pair, priority=1, vehicle_id=None):
         return False
 
     try:
-        berkeley_cycle_once()
+
 
         # Get pedestrian acknowledgment for VIP
         zk_proxy = get_zookeeper_proxy()
+        zk_proxy.coordinate_berkeley_sync(CONTROLLER_NAME)
         timestamp = increment_lamport_clock()
         ped_response = zk_proxy.request_ped_ack(
             CONTROLLER_NAME, target_pair, timestamp, "VIP", requester_info
