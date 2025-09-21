@@ -6,22 +6,24 @@ import threading
 import uuid
 from xmlrpc.client import ServerProxy
 from xmlrpc.server import SimpleXMLRPCServer
+from xmlrpc.client import ServerProxy, Transport  # <-- Make sure Transport is imported
+
 
 # -------------------------
 # CONFIGURATION
 # -------------------------
 MY_PORT = 7000
 MY_NAME = "t_signal"
-ZOOKEEPER_IP = "http://localhost:6000"  # Fixed to localhost
-
+ZOOKEEPER_IP = "http://127.0.0.1:6000"  # Fixed to localhost
+ZOOKEEPER_URL = "http://127.0.0.1:6000"
 # Initial clock skew: +30 minutes (in seconds)
 local_skew = 30 * 60
 
 # Simulation parameters
 VIP_PROBABILITY = 0.35  # 35% chance of a VIP vehicle
-REQUEST_INTERVAL_MIN = 2  # Minimum seconds between request bursts
-REQUEST_INTERVAL_MAX = 5  # Maximum seconds between request bursts
-REQUEST_BURST_SIZE = 2  # Number of requests to send in a quick burst
+REQUEST_INTERVAL_MIN = 5
+REQUEST_INTERVAL_MAX = 10
+REQUEST_BURST_SIZE = 2
 
 signal_pairs = {"1": [1, 2], "2": [1, 2], "3": [3, 4], "4": [3, 4]}
 
@@ -41,26 +43,42 @@ stats_lock = threading.Lock()
 # Connection caching for better performance
 zookeeper_proxy = None
 
+# Add this class definition after the imports
+class TimeoutTransport(Transport):
+    def __init__(self, timeout):
+        super().__init__()
+        self.timeout = timeout
 
+    def make_connection(self, host):
+        conn = super().make_connection(host)
+        conn.timeout = self.timeout
+        return conn
 # -------------------------
 # CONNECTION MANAGEMENT
 # -------------------------
 def get_zookeeper_connection():
-    """Get fresh ZooKeeper connection each time"""
-    try:
-        proxy = ServerProxy(ZOOKEEPER_IP, allow_none=True)
-        # Test connection immediately
-        proxy.ping()
-        return proxy
-    except Exception as e:
-        print(f"[{MY_NAME}] ZooKeeper connection failed: {e}")
-        return None
+    """Get ZooKeeper connection with retry logic"""
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            # Create transport with timeout first
+            transport = TimeoutTransport(10)  # 10 second timeout
+            # Then create ServerProxy with the transport
+            proxy = ServerProxy(ZOOKEEPER_URL, allow_none=True, transport=transport)
+            # Test connection
+            proxy.ping()
+            return proxy
+        except Exception as e:
+            if attempt == max_retries - 1:
+                raise e
+            time.sleep(1)
+    return None
 
 
 def test_zookeeper_connection():
     """Initial connection test"""
     try:
-        proxy = get_zookeeper_connection()
+        proxy = get_zookeeper_connection()  # This will now use the fixed version
         if proxy:
             response = proxy.ping()
             print(f"[{MY_NAME}] Successfully connected to ZooKeeper: {response}")
@@ -117,7 +135,7 @@ def traffic_detection_loop():
         with stats_lock:
             recent_failures = request_stats["failed_requests"]
             total_requests = request_stats["total_requests"]
-
+        sleep_time = random.randint(REQUEST_INTERVAL_MIN, REQUEST_INTERVAL_MAX)
         if total_requests > 0:
             failure_rate = recent_failures / total_requests
             if failure_rate > 0.3:  # If >30% failure rate
@@ -306,7 +324,7 @@ def update_simulation_config(vip_prob=None, interval_min=None, interval_max=None
 def ping():
     """Health check method"""
     try:
-        proxy = get_zookeeper_connection()
+        proxy = get_zookeeper_connection()  # This will use the fixed version
         zk_status = "Connected" if proxy else "Disconnected"
         return f"{MY_NAME} OK - ZooKeeper: {zk_status}"
     except:

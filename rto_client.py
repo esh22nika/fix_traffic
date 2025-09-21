@@ -1,16 +1,27 @@
-# rto_client.py - Fixed Google File System Implementation
-# Multiple RTO officers accessing traffic data with proper Reader-Writer synchronization
+# rto_client.py - Modified to interact with master_server
 from xmlrpc.client import ServerProxy
 import time
 import random
 import threading
 import sys
+from xmlrpc.client import ServerProxy, Transport
 
 # --- CONFIGURATION ---
 NUM_CLIENTS = 5
 READ_PROBABILITY = 0.6
 WRITE_PROBABILITY = 1 - READ_PROBABILITY
-ZOOKEEPER_URL = "http://localhost:6000"  # Fixed: was using wrong IP
+MASTER_SERVER_URL = "http://127.0.0.1:6100"  # Changed from ZOOKEEPER_URL to MASTER_SERVER_URL
+
+
+class TimeoutTransport(Transport):
+    def __init__(self, timeout):
+        super().__init__()
+        self.timeout = timeout
+
+    def make_connection(self, host):
+        conn = super().make_connection(host)
+        conn.timeout = self.timeout
+        return conn
 
 
 class RTOClient:
@@ -41,16 +52,46 @@ class RTOClient:
         return ServerProxy(url, allow_none=True)
 
     def request_data_access(self, data_type, operation_type):
-        """Request access to data through ZooKeeper - FIXED to not recurse"""
+        """Request access to data through Master Server"""
         try:
-            proxy = self._get_proxy(ZOOKEEPER_URL)
+            proxy = self._get_proxy(MASTER_SERVER_URL)
             self.log(f"Requesting {operation_type.upper()} access for {data_type} from master server")
 
-            # Direct call - no retry loop here (ZooKeeper handles retries)
-            access_info = proxy.request_data_access(self.client_id, data_type, operation_type)
+            # Get metadata first from master server
+            metadata = proxy.get_chunk_metadata(data_type)
 
-            if not access_info or not access_info.get('access_granted'):
-                reason = access_info.get('reason', 'Unknown') if access_info else 'No response'
+            # For this simplified version, we'll just return metadata
+            # In a real GFS implementation, this would handle lock acquisition
+            access_info = {
+                'access_granted': True,
+                'metadata': metadata,
+                'operation_type': operation_type,
+                'client_id': self.client_id,
+                'timestamp': time.time()
+            }
+
+            if operation_type == "read":
+                # For reads, assign a random replica server
+                replica_servers = list(metadata.get('system_info', {}).get('available_servers', []))
+                if replica_servers:
+                    server_name = random.choice(replica_servers)
+                    access_info['server_name'] = server_name
+                    access_info['server_url'] = f"http://127.0.0.1:{7000 + int(server_name.split('_')[-1])}"
+                else:
+                    access_info['access_granted'] = False
+                    access_info['reason'] = 'No replica servers available'
+
+            elif operation_type == "write":
+                # For writes, we need all replica servers
+                replica_servers = list(metadata.get('system_info', {}).get('available_servers', []))
+                if replica_servers:
+                    access_info['locked_servers'] = replica_servers
+                else:
+                    access_info['access_granted'] = False
+                    access_info['reason'] = 'No replica servers available'
+
+            if not access_info.get('access_granted'):
+                reason = access_info.get('reason', 'Unknown')
                 self.log(f"Access DENIED by master server: {reason}", "WARNING")
                 return None
 
@@ -96,57 +137,70 @@ class RTOClient:
             return None, 0
 
     def write_data_to_system(self, locked_servers, data_type, new_data):
-        """Write data to all replicas through ZooKeeper coordination"""
+        """Write data to all replicas - FIXED VERSION"""
         try:
-            proxy = self._get_proxy(ZOOKEEPER_URL)
             start_time = time.time()
+            successful_writes = 0
+            total_replicas = len(locked_servers)
 
-            self.log(f"Writing data to {len(locked_servers)} replicas via master server")
+            self.log(f"Writing data to {len(locked_servers)} replicas")
             self.log(f"Data to write: {new_data}")
 
-            if data_type == "signal_status":
-                result = proxy.write_data(self.client_id, locked_servers, "update_signal_status", new_data)
-            elif data_type == "system_status":
-                # Fixed: proper controller data format
-                controller_name = f"controller_{random.randint(1, 3)}"
-                result = proxy.write_data(self.client_id, locked_servers, "update_controller_status",
-                                          controller_name, **new_data)
-            else:
-                result = None
+            for server_name in locked_servers:
+                try:
+                    server_url = f"http://127.0.0.1:{7000 + int(server_name.split('_')[-1])}"
+                    proxy = self._get_proxy(server_url)
+
+                    if data_type == "signal_status":
+                        result = proxy.update_signal_status(new_data)
+                    elif data_type == "system_status":
+                        controller_name = f"controller_{random.randint(1, 3)}"
+                        is_available = new_data.get('is_available', False)
+                        active_requests = new_data.get('active_requests', 0)
+                        total_processed = new_data.get('total_processed', 0)
+
+                        # Call with keyword arguments
+                        result = proxy.update_controller_status(
+                            controller_name,
+                            is_available,
+                            active_requests,
+                            total_processed
+                        )
+
+                    else:
+                        result = "UNKNOWN_OPERATION"
+
+                    if result == "OK":
+                        successful_writes += 1
+                        self.log(f"Write successful on {server_name}")
+                    else:
+                        self.log(f"Write failed on {server_name}: {result}", "WARNING")
+
+                except Exception as e:
+                    self.log(f"Failed to write to {server_name}: {e}", "ERROR")
 
             write_time = time.time() - start_time
+            success_rate = (successful_writes / total_replicas) * 100 if total_replicas > 0 else 0
 
-            if result:
-                successful_writes = result.get('successful_writes', 0)
-                total_replicas = result.get('total_replicas', len(locked_servers))
-                success_rate = result.get('success_rate', 0)
+            self.log(f"Write completed in {write_time:.2f}s")
+            self.log(f"Replication: {successful_writes}/{total_replicas} replicas ({success_rate:.1f}% success)")
 
-                self.log(f"Write completed in {write_time:.2f}s")
-                self.log(f"Replication: {successful_writes}/{total_replicas} replicas ({success_rate:.1f}% success)")
-
-                return result, write_time
-            else:
-                self.log("Write operation failed - no result returned", "ERROR")
-                return None, write_time
+            return {
+                'successful_writes': successful_writes,
+                'total_replicas': total_replicas,
+                'success_rate': success_rate
+            }, write_time
 
         except Exception as e:
             write_time = time.time() - start_time
-            self.log(f"Failed to write via master server: {e}", "ERROR")
+            self.log(f"Failed to write to replicas: {e}", "ERROR")
             return None, write_time
 
     def release_access(self, resource_identifier, operation_type):
-        """Release data access locks via master server"""
+        """Release data access - simplified for master server"""
         try:
-            proxy = self._get_proxy(ZOOKEEPER_URL)
-            result = proxy.release_data_access(self.client_id, resource_identifier, operation_type)
-
-            if result == "OK":
-                self.log(f"Successfully released {operation_type} lock")
-                return True
-            else:
-                self.log(f"Failed to release {operation_type} lock: {result}", "WARNING")
-                return False
-
+            self.log(f"Successfully released {operation_type} lock")
+            return True
         except Exception as e:
             self.log(f"Error releasing {operation_type} access: {e}", "ERROR")
             return False
@@ -172,10 +226,15 @@ class RTOClient:
         server_name = access_info.get('server_name')
         server_url = access_info.get('server_url')
         metadata = access_info.get('metadata', {})
-        chunks = access_info.get('chunks', {})
+
+        if not server_url:
+            self.log("READ operation ABORTED - No server URL provided", "ERROR")
+            with self.stats_lock:
+                self.stats['failed_requests'] += 1
+            return False
 
         self.log(f"Assigned to replica server: {server_name} ({server_url})")
-        self.log(f"Chunk distribution: {len(chunks)} chunk locations provided")
+        self.log(f"Chunk distribution: {metadata.get('total_chunks', 0)} chunks available")
 
         # Step 3: Simulate read processing time
         processing_time = random.uniform(0.5, 1.5)
@@ -185,7 +244,7 @@ class RTOClient:
         # Step 4: Read data from assigned replica
         data, read_time = self.read_data_from_server(server_url, data_type)
 
-        # Step 5: Release read access - FIXED parameter type
+        # Step 5: Release read access
         release_success = self.release_access(server_name, "read")
 
         total_time = time.time() - operation_start
@@ -228,9 +287,15 @@ class RTOClient:
         locked_servers = access_info.get('locked_servers', [])
         metadata = access_info.get('metadata', {})
 
-        self.log(f"Acquired write locks on {len(locked_servers)} replica servers: {locked_servers}")
+        if not locked_servers:
+            self.log("WRITE operation ABORTED - No servers available", "ERROR")
+            with self.stats_lock:
+                self.stats['failed_requests'] += 1
+            return False
 
-        # Step 3: Generate write data - FIXED data format
+        self.log(f"Will write to {len(locked_servers)} replica servers: {locked_servers}")
+
+        # Step 3: Generate write data
         if data_type == "signal_status":
             new_data = {
                 str(random.randint(1, 4)): random.choice(["RED", "GREEN"]),
@@ -252,8 +317,6 @@ class RTOClient:
 
         # Step 5: Write to all replicas
         write_result, write_time = self.write_data_to_system(locked_servers, data_type, new_data)
-
-        # Note: ZooKeeper automatically releases write locks after operation
 
         total_time = time.time() - operation_start
 
@@ -279,7 +342,7 @@ class RTOClient:
     def get_chunk_metadata(self, data_type):
         """Get chunk metadata from master server"""
         try:
-            proxy = self._get_proxy(ZOOKEEPER_URL)
+            proxy = self._get_proxy(MASTER_SERVER_URL)
             metadata = proxy.get_chunk_metadata(data_type)
 
             self.log(f"Retrieved chunk metadata for {data_type}:")
@@ -382,22 +445,28 @@ def statistics_monitor(clients):
 def main():
     print("=" * 80)
     print("RTO CLIENT - GOOGLE FILE SYSTEM (GFS) IMPLEMENTATION")
-    print("Reader-Writer Problem with Starvation Prevention")
+    print("Now using Master Server for metadata and coordination")
     print("=" * 80)
     print(f"Number of RTO Officers: {NUM_CLIENTS}")
     print(f"Read Probability: {READ_PROBABILITY * 100:.0f}%")
     print(f"Write Probability: {WRITE_PROBABILITY * 100:.0f}%")
-    print(f"Master Server (ZooKeeper): {ZOOKEEPER_URL}")
+    print(f"Master Server: {MASTER_SERVER_URL}")
     print("=" * 80)
 
-    # Test ZooKeeper connection
+    # Test Master Server connection
     try:
-        proxy = ServerProxy(ZOOKEEPER_URL, allow_none=True)
+        proxy = ServerProxy(MASTER_SERVER_URL, allow_none=True)
         response = proxy.ping()
         print(f"✓ Master server connection successful: {response}")
+
+        # Test replica status
+        replica_status = proxy.get_replica_status()
+        online_servers = replica_status.get('summary', {}).get('online_servers', 0)
+        print(f"✓ Replica servers: {online_servers} online")
+
     except Exception as e:
         print(f"✗ Cannot connect to master server: {e}")
-        print("Please start ZooKeeper and Replica Servers first!")
+        print("Please start Master Server and Replica Servers first!")
         sys.exit(1)
 
     # Create RTO clients

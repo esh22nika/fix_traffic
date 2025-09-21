@@ -1,4 +1,4 @@
-# zookeeper.py - Complete Enhanced Load Balancer with RA, Berkeley, and GFS-style Replica Management
+# zookeeper.py - Final, corrected version with ready flag
 from xmlrpc.server import SimpleXMLRPCServer
 from xmlrpc.client import ServerProxy, Transport
 import time
@@ -10,30 +10,34 @@ from collections import deque, defaultdict
 import hashlib
 import logging
 import random
+import psutil
+import os
 
 # ====== CONFIGURATION ======
 ZOOKEEPER_PORT = 6000
-RESPONSE_TIMEOUT = 10
+RESPONSE_TIMEOUT = 20
 DB_PATH = "traffic_system.db"
 
 # Controllers configuration
 BASE_CONTROLLERS = {
-    "controller": "http://localhost:8000",
-    "controller_clone": "http://localhost:8001"
+    "controller": "http://127.0.0.1:8000",
+    "controller_clone": "http://127.0.0.1:8001"
 }
 
 # Client configuration for Berkeley sync
 BERKELEY_CLIENTS = {
-    "t_signal": "http://localhost:7000",
-    "p_signal": "http://localhost:9000"
+    "t_signal": "http://127.0.0.1:7000",
+    "p_signal": "http://127.0.0.1:9000"
 }
 
-# Replica servers configuration (GFS-style)
+# Replica servers configuration (GFS-style) - COMMENTED OUT: moved to master_server
+'''
 REPLICA_SERVERS = {
-    "server_1": {"url": "http://localhost:7001", "port": 7001},
-    "server_2": {"url": "http://localhost:7002", "port": 7002},
-    "server_3": {"url": "http://localhost:7003", "port": 7003}
+    "server_1": {"url": "http://127.0.0.1:7001", "port": 7001},
+    "server_2": {"url": "http://127.0.0.1:7002", "port": 7002},
+    "server_3": {"url": "http://127.0.0.1:7003", "port": 7003}
 }
+'''
 
 # Logging configuration
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
@@ -49,6 +53,12 @@ class TimeoutTransport(Transport):
         conn = super().make_connection(host)
         conn.timeout = self.timeout
         return conn
+
+
+def log_memory_usage():
+    process = psutil.Process(os.getpid())
+    memory_mb = process.memory_info().rss / 1024 / 1024
+    print(f"ZooKeeper memory usage: {memory_mb:.2f} MB")
 
 
 class DatabaseManager:
@@ -146,6 +156,8 @@ class DatabaseManager:
                 }
 
 
+# COMMENTED OUT: GFS functionality moved to master_server
+'''
 class ConsistentHashManager:
     """Hash ring for chunk distribution across replica servers"""
 
@@ -193,7 +205,6 @@ class ConsistentHashManager:
 
         return servers[:count]
 
-
 class ReaderWriterLock:
     """Reader-Writer lock with starvation prevention using FIFO queue"""
 
@@ -231,14 +242,14 @@ class ReaderWriterLock:
             self.readers -= 1
             logger.info(f"[RW-LOCK] {client_id} released READ lock (readers: {self.readers})")
             if self.readers == 0:
-                self.queue_condition.notifyAll()  # Wake up waiting writers
+                self.queue_condition.notify_all()  # Wake up waiting writers
 
     def acquire_write(self, client_id="unknown"):
         request_id = f"WRITE_{client_id}_{time.time()}"
         with self.lock:
             self.writers_waiting += 1
             self.request_queue.append(('write', request_id, threading.current_thread()))
-            logger.info(f"[RW-LOCK] {client_id} queued for WRITE access (queue size: {len(self.request_queue)})")
+            logger.info(f"[RW-LOCK] {client_id} queed for WRITE access (queue size: {len(self.request_queue)})")
 
             while True:
                 # Check if this write request is at the front and can proceed
@@ -258,8 +269,7 @@ class ReaderWriterLock:
         with self.lock:
             self.writer_active = False
             logger.info(f"[RW-LOCK] {client_id} released WRITE lock")
-            self.queue_condition.notifyAll()  # Wake up all waiting requests
-
+            self.queue_condition.notify_all()  # Wake up all waiting requests
 
 class ReplicaManager:
     """Google File System style replica management with proper chunking"""
@@ -303,7 +313,7 @@ class ReplicaManager:
     def get_chunk_metadata(self, data_type):
         """Get detailed chunk metadata"""
         try:
-            # Get data from first available replica
+            # Get data from first available replica using XML-RPC
             sample_data = None
             for server_name, server_info in REPLICA_SERVERS.items():
                 try:
@@ -313,7 +323,8 @@ class ReplicaManager:
                         sample_data = proxy.get_signal_status()
                     elif data_type == "system_status":
                         sample_data = proxy.get_system_stats()
-                    break
+                    if sample_data:
+                        break  # Success, break out of loop
                 except Exception as e:
                     logger.warning(f"Failed to get sample data from {server_name}: {e}")
                     continue
@@ -481,6 +492,7 @@ class ReplicaManager:
 
         logger.info(f"[GFS] Write operation completed: {successful_writes}/{len(servers)} successful")
         return results
+'''
 
 
 class ControllerState:
@@ -518,9 +530,11 @@ class ControllerState:
 class ZooKeeperLoadBalancer:
     def __init__(self):
         self.db = DatabaseManager(DB_PATH)
-        self.replica_manager = ReplicaManager()
+        # COMMENTED OUT: Replica manager moved to master_server
+        # self.replica_manager = ReplicaManager()
         self.controllers = {}
         self.lock = threading.Lock()
+        self.is_ready = threading.Event()
 
         # Ricart-Agrawala state
         self.lamport_clock = 0
@@ -533,6 +547,24 @@ class ZooKeeperLoadBalancer:
             self.controllers[name] = ControllerState(name, url)
 
         logger.info("ZooKeeper Load Balancer initialized with RA support")
+        self.wait_for_controllers_ready()
+
+    def wait_for_controllers_ready(self):
+        """Wait for all controllers to be ready"""
+        for name, controller in self.controllers.items():
+            try:
+                proxy = ServerProxy(controller.url, allow_none=True,
+                                    transport=TimeoutTransport(15))
+                for i in range(10):  # Retry 10 times
+                    try:
+                        if proxy.is_ready():
+                            logger.info(f"Controller {name} is ready")
+                            break
+                        time.sleep(1)
+                    except:
+                        time.sleep(1)
+            except Exception as e:
+                logger.warning(f"Controller {name} not ready: {e}")
 
     def increment_lamport_clock(self):
         """Increment Lamport clock for RA"""
@@ -546,7 +578,8 @@ class ZooKeeperLoadBalancer:
             self.lamport_clock = max(self.lamport_clock, received_timestamp) + 1
 
     # ====== RICART-AGRAWALA IMPLEMENTATION ======
-    def forward_ra_request(self, from_controller, to_controller, timestamp, target_pair, request_type):
+    def forward_ra_request(self, from_controller, to_controller, timestamp, target_pair, request_type,
+                           requester_info=""):
         """Forward RA request between controllers AND p_signal"""
         logger.info(
             f"[RA] Forwarding RA request: {from_controller} -> {to_controller} (ts={timestamp}, type={request_type})")
@@ -555,7 +588,6 @@ class ZooKeeperLoadBalancer:
 
         try:
             if to_controller == "p_signal":
-                # p_signal always votes OK for RA (separate from pedestrian safety check)
                 proxy = ServerProxy(BERKELEY_CLIENTS["p_signal"], allow_none=True,
                                     transport=TimeoutTransport(RESPONSE_TIMEOUT))
                 response = proxy.p_signal_ra(target_pair, timestamp, from_controller, request_type)
@@ -692,15 +724,21 @@ class ZooKeeperLoadBalancer:
             if not self.controllers:
                 return None
 
+            # Filter out unavailable controllers
+            available_controllers = {name: controller for name, controller in self.controllers.items() if
+                                     controller.is_available}
+
+            if not available_controllers:
+                return None
+
             # Calculate detailed load for each controller
             controller_loads = []
-            for name, controller in self.controllers.items():
+            for name, controller in available_controllers.items():
                 current_load = controller.get_load()
                 total_processed = controller.total_processed
-                availability_score = 1.0 if controller.is_available else 0.0
 
                 # Combined score: lower is better
-                combined_score = (current_load * 2) + (total_processed * 0.1) + (1.0 - availability_score) * 100
+                combined_score = (current_load * 2) + (total_processed * 0.1)
                 controller_loads.append((combined_score, current_load, total_processed, name, controller))
 
                 logger.debug(
@@ -714,151 +752,33 @@ class ZooKeeperLoadBalancer:
                 f"[LOAD-BALANCE] Selected {selected.name} (active: {selected.get_load()}, total: {selected.total_processed})")
             return selected
 
-    # ====== GFS REPLICA MANAGEMENT (COMPLETE IMPLEMENTATION) ======
+    # ====== GFS REPLICA MANAGEMENT - COMMENTED OUT: MOVED TO MASTER_SERVER ======
+    '''
     def request_data_access(self, client_id, data_type, operation_type, retry_count=0):
         """Handle RTO data access with complete chunk metadata and limited retries"""
-        max_retries = 10  # Prevent infinite recursion
-
-        if retry_count >= max_retries:
-            logger.error(f"[GFS-ACCESS] Max retries ({max_retries}) exceeded for {client_id}")
-            return {'access_granted': False, 'reason': f'Max retries exceeded after {max_retries} attempts'}
-
-        logger.info(
-            f"[GFS-ACCESS] {client_id} requesting {operation_type.upper()} access for {data_type} (attempt {retry_count + 1})")
-
-        # Always generate complete metadata first
-        metadata = self.replica_manager.get_chunk_metadata(data_type)
-
-        if operation_type == "read":
-            server = self.replica_manager.acquire_read_access(data_type, client_id)
-            if server:
-                server_info = REPLICA_SERVERS[server]
-
-                access_response = {
-                    'access_granted': True,
-                    'server_name': server,
-                    'server_url': server_info['url'],
-                    'chunks': metadata['chunk_distribution'],
-                    'metadata': metadata,
-                    'operation_type': 'read',
-                    'client_id': client_id,
-                    'timestamp': time.time(),
-                    'retry_count': retry_count
-                }
-
-                logger.info(
-                    f"[GFS-ACCESS] READ granted to {client_id} on {server} - {metadata['total_chunks']} chunks available")
-                return access_response
-            else:
-                # Limited retry mechanism
-                logger.warning(
-                    f"[GFS-ACCESS] READ access delayed for {client_id}, retrying... (attempt {retry_count + 1}/{max_retries})")
-                time.sleep(0.5)
-                return self.request_data_access(client_id, data_type, operation_type, retry_count + 1)
-
-        elif operation_type == "write":
-            servers = self.replica_manager.acquire_write_access(data_type, client_id)
-            if servers:
-                access_response = {
-                    'access_granted': True,
-                    'locked_servers': servers,
-                    'metadata': metadata,
-                    'operation_type': 'write',
-                    'client_id': client_id,
-                    'timestamp': time.time(),
-                    'retry_count': retry_count
-                }
-
-                logger.info(
-                    f"[GFS-ACCESS] WRITE granted to {client_id} on {len(servers)} servers - {metadata['total_chunks']} chunks to update")
-                return access_response
-            else:
-                # Limited retry mechanism
-                logger.warning(
-                    f"[GFS-ACCESS] WRITE access delayed for {client_id}, retrying... (attempt {retry_count + 1}/{max_retries})")
-                time.sleep(1.0)  # Longer wait for writes
-                return self.request_data_access(client_id, data_type, operation_type, retry_count + 1)
-
-        # Fallback - should never reach here
-        logger.error(f"[GFS-ACCESS] Invalid operation type: {operation_type}")
-        return {'access_granted': False, 'reason': 'Invalid operation type'}
+        # ... GFS implementation moved to master_server
+        pass
 
     def release_data_access(self, client_id, resource_identifier, operation_type):
         """Release data access - handles both server names and server lists"""
-        logger.info(f"[GFS-RELEASE] {client_id} releasing {operation_type.upper()} lock on {resource_identifier}")
-
-        try:
-            if operation_type == "read":
-                if isinstance(resource_identifier, str):
-                    server_name = resource_identifier
-                    self.replica_manager.release_read_access(server_name, client_id)
-                    return "OK"
-                else:
-                    logger.error(f"[GFS-RELEASE] Invalid server identifier for READ: {resource_identifier}")
-                    return "ERROR"
-
-            elif operation_type == "write":
-                if isinstance(resource_identifier, list):
-                    servers = resource_identifier
-                    self.replica_manager.release_write_access(servers, client_id)
-                    return "OK"
-                elif isinstance(resource_identifier, str):
-                    # Handle single server name (convert to list)
-                    servers = [resource_identifier] if resource_identifier in REPLICA_SERVERS else list(
-                        REPLICA_SERVERS.keys())
-                    self.replica_manager.release_write_access(servers, client_id)
-                    return "OK"
-                else:
-                    logger.error(f"[GFS-RELEASE] Invalid server identifier for WRITE: {resource_identifier}")
-                    return "ERROR"
-
-            return "OK"
-        except Exception as e:
-            logger.error(f"[GFS-RELEASE] Failed to release {operation_type} access for {client_id}: {e}")
-            return "ERROR"
+        # ... GFS implementation moved to master_server
+        pass
 
     def write_data(self, client_id, locked_servers, operation, *args, **kwargs):
         """Perform replicated write operation with verification"""
-        logger.info(f"[GFS-WRITE] {client_id} performing {operation} on {len(locked_servers)} replicas")
-        logger.info(f"[GFS-WRITE] Write data: {args[:1]}...")  # Log first arg only to avoid spam
-
-        results = self.replica_manager.replicate_write(locked_servers, operation, client_id, *args, **kwargs)
-
-        # Verify write success
-        successful_writes = sum(1 for result in results.values() if result == "OK")
-        total_replicas = len(locked_servers)
-
-        if successful_writes == total_replicas:
-            logger.info(f"[GFS-WRITE] {client_id} write operation SUCCESSFUL on all {total_replicas} replicas")
-        elif successful_writes >= (total_replicas // 2 + 1):
-            logger.warning(
-                f"[GFS-WRITE] {client_id} write operation PARTIAL SUCCESS: {successful_writes}/{total_replicas}")
-        else:
-            logger.error(
-                f"[GFS-WRITE] {client_id} write operation FAILED: only {successful_writes}/{total_replicas} succeeded")
-
-        # Auto-release write locks after operation
-        self.replica_manager.release_write_access(locked_servers, client_id)
-
-        return {
-            'results': results,
-            'successful_writes': successful_writes,
-            'total_replicas': total_replicas,
-            'success_rate': (successful_writes / total_replicas) * 100,
-            'status': 'COMPLETE'
-        }
+        # ... GFS implementation moved to master_server
+        pass
 
     def get_chunk_metadata(self, data_type):
         """Get complete chunk metadata for RTO clients"""
-        logger.info(f"[GFS-METADATA] Generating chunk metadata for {data_type}")
-        metadata = self.replica_manager.get_chunk_metadata(data_type)
-        logger.info(
-            f"[GFS-METADATA] Generated metadata: {metadata['total_chunks']} chunks, {metadata['replication_factor']} replicas each")
-        return metadata
+        # ... GFS implementation moved to master_server
+        pass
+    '''
 
     # ====== MAIN RPC METHODS ======
     def signal_request(self, client_id, target_pair, request_type="normal"):
         """Handle signal requests from t_signal"""
+        self.is_ready.wait()
         logger.info(f"[TRAFFIC-SIGNAL] Request from {client_id}: {target_pair} ({request_type})")
 
         controller = self.get_least_loaded_controller()
@@ -885,6 +805,7 @@ class ZooKeeperLoadBalancer:
 
     def vip_arrival(self, client_id, target_pair, priority=1, vehicle_id=None):
         """Handle VIP requests with proper deadlock resolution"""
+        self.is_ready.wait()
         vehicle_id = vehicle_id or f"VIP_{uuid.uuid4().hex[:6]}"
         logger.info(f"[VIP-ARRIVAL] {client_id}: VIP {vehicle_id} (P{priority}) requesting {target_pair}")
 
@@ -974,6 +895,8 @@ class ZooKeeperLoadBalancer:
         active_controllers = sum(1 for c in self.controllers.values() if c.is_available)
         return f"ZooKeeper OK - {active_controllers} controllers active"
 
+    # COMMENTED OUT: GFS system status moved to master_server
+    '''
     def get_system_status(self):
         """Enhanced system status with GFS and RA info"""
         base_stats = self.db.get_system_stats()
@@ -1003,6 +926,7 @@ class ZooKeeperLoadBalancer:
         })
 
         return base_stats
+    '''
 
     def update_signal_status(self, signal_status):
         """Update signal status in database"""
@@ -1022,12 +946,20 @@ class ZooKeeperLoadBalancer:
 if __name__ == "__main__":
     logger.info("=" * 80)
     logger.info("COMPLETE ENHANCED ZOOKEEPER LOAD BALANCER")
-    logger.info("Features: Ricart-Agrawala | Berkeley 7-Step | GFS Replicas | VIP Deadlock")
+    logger.info("Features: Ricart-Agrawala | Berkeley 7-Step | VIP Deadlock")
+    logger.info("GFS Features: MOVED TO MASTER_SERVER")
     logger.info("=" * 80)
 
     lb = ZooKeeperLoadBalancer()
 
-    server = SimpleXMLRPCServer(("0.0.0.0", ZOOKEEPER_PORT), allow_none=True)
+    from socketserver import ThreadingMixIn
+
+
+    class ThreadedXMLRPCServer(ThreadingMixIn, SimpleXMLRPCServer):
+        pass
+
+
+    server = ThreadedXMLRPCServer(("0.0.0.0", ZOOKEEPER_PORT), allow_none=True)
 
     # Traffic control
     server.register_function(lb.signal_request, "signal_request")
@@ -1042,22 +974,32 @@ if __name__ == "__main__":
     server.register_function(lb.coordinate_berkeley_sync, "coordinate_berkeley_sync")
     server.register_function(lb.get_client_list, "get_client_list")
 
-    # GFS replica management
+    # COMMENTED OUT: GFS replica management moved to master_server
+    '''
     server.register_function(lb.request_data_access, "request_data_access")
     server.register_function(lb.release_data_access, "release_data_access")
     server.register_function(lb.write_data, "write_data")
     server.register_function(lb.get_chunk_metadata, "get_chunk_metadata")
+    '''
 
     # Utility
     server.register_function(lb.ping, "ping")
-    server.register_function(lb.get_system_status, "get_system_status")
+    # server.register_function(lb.get_system_status, "get_system_status")  # COMMENTED OUT: moved to master_server
     server.register_function(lb.update_signal_status, "update_signal_status")
     server.register_function(lb.get_signal_status, "get_signal_status")
+
+    log_memory_usage()
+
+    # Set the ready flag once all initialization is complete
+    lb.is_ready.set()
 
     logger.info(f"ZooKeeper ready on port {ZOOKEEPER_PORT}")
 
     try:
+        print(f"ZooKeeper ready on port {ZOOKEEPER_PORT}")
         server.serve_forever()
-    except KeyboardInterrupt:
-        logger.info("ZooKeeper shutting down...")
-        logger.info("=" * 80)
+    except Exception as e:
+        print(f"ZooKeeper crashed: {e}")
+        import traceback
+
+        traceback.print_exc()

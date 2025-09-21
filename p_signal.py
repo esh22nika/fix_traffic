@@ -3,6 +3,9 @@ import time
 import threading
 from xmlrpc.server import SimpleXMLRPCServer
 from xmlrpc.client import ServerProxy
+from xmlrpc.client import ServerProxy, Transport  # <-- Make sure Transport is imported
+
+# Add this class definition after the imports
 
 # -------------------------
 # CONFIGURATION
@@ -14,7 +17,7 @@ MY_NAME = "p_signal"
 local_skew = -45 * 60
 
 # ZooKeeper IP (for RTO integration / monitoring)
-ZOOKEEPER_IP = "http://localhost:6000"
+ZOOKEEPER_IP = "http://127.0.0.1:6000"
 
 # Shared signal status (kept in sync with controllers)
 # This should be updated whenever controllers change states
@@ -32,11 +35,19 @@ request_stats = {
 }
 stats_lock = threading.Lock()
 
+class TimeoutTransport(Transport):
+    def __init__(self, timeout):
+        super().__init__()
+        self.timeout = timeout
 
+    def make_connection(self, host):
+        conn = super().make_connection(host)
+        conn.timeout = self.timeout
+        return conn
 # -------------------------
 # PEDESTRIAN VOTING LOGIC
 # -------------------------
-def p_signal(self, target_pair):
+def p_signal(target_pair):
     """SECOND OK: Non-RA pedestrian safety check"""
     with stats_lock:
         request_stats["total_requests"] += 1
@@ -56,7 +67,7 @@ def p_signal(self, target_pair):
         return "DENY"
 
 
-def p_signal_ra(self, target_pair, timestamp, requester_controller, request_type):
+def p_signal_ra(target_pair, timestamp, requester_controller, request_type):
     """Enhanced p_signal for Ricart-Agrawala voting with timestamp"""
     with stats_lock:
         request_stats["total_requests"] += 1
@@ -175,7 +186,9 @@ def log_system_status():
 def get_real_time_data():
     """RTO officers can get real-time pedestrian data via ZooKeeper"""
     try:
-        proxy = ServerProxy(ZOOKEEPER_IP, allow_none=True)
+        # FIXED: Use correct Transport pattern with timeout
+        transport = TimeoutTransport(10)  # 10 second timeout
+        proxy = ServerProxy(ZOOKEEPER_IP, allow_none=True, transport=transport)
         system_status = proxy.get_system_status()
 
         with stats_lock:
