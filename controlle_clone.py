@@ -44,6 +44,18 @@ def is_ready():
     return True
 
 
+def update_zookeeper_signals():
+    """Push current signal status to ZooKeeper database"""
+    try:
+        zk_proxy = get_zookeeper_proxy()
+        with state_lock:
+            current_status = signal_status.copy()
+
+        result = zk_proxy.update_signal_status(current_status)
+        print(f"[{CONTROLLER_NAME}] Updated ZooKeeper database: {result}")
+    except Exception as e:
+        print(f"[{CONTROLLER_NAME}] Failed to update ZooKeeper database: {e}")
+
 class TimeoutTransport(Transport):
     def __init__(self, timeout):
         super().__init__()

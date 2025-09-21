@@ -144,7 +144,7 @@ def request_critical_section(target_pair, request_type="normal", requester_info=
     # Send RA request to other nodes via ZooKeeper
     try:
         zk_proxy = get_zookeeper_proxy()
-        other_nodes = ["controller_clone", "p_signal"]
+        other_nodes = ["controller", "p_signal"]
 
         responses = {}
         for node in other_nodes:
@@ -572,4 +572,5 @@ if __name__ == "__main__":
         server.serve_forever()
     except KeyboardInterrupt:
         print(f"\n[{CONTROLLER_NAME}] Shutting down...")
+
 

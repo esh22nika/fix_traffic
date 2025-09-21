@@ -1,0 +1,837 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Traffic Signal Control System</title>
+    <style>
+        :root {
+            --red: #ff4757;
+            --green: #2ed573;
+            --yellow: #ffa502;
+            --blue: #3742fa;
+            --dark: #2f3542;
+            --light: #f1f2f6;
+            --intersection-bg: #57606f;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        body {
+            background-color: #1e272e;
+            color: var(--light);
+            padding: 20px;
+            line-height: 1.6;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 30px;
+            padding: 20px;
+            background-color: var(--dark);
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        h1 {
+            color: var(--light);
+            margin-bottom: 10px;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 2fr 1fr;
+            gap: 20px;
+        }
+
+        .intersection {
+            background-color: var(--dark);
+            padding: 40px;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            position: relative;
+            min-height: 500px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .intersection-grid {
+            position: relative;
+            width: 400px;
+            height: 400px;
+        }
+
+        .road {
+            position: absolute;
+            background-color: var(--intersection-bg);
+            border: 3px solid #fff;
+        }
+
+        .horizontal-road {
+            width: 100%;
+            height: 60px;
+            top: 50%;
+            transform: translateY(-50%);
+        }
+
+        .vertical-road {
+            width: 60px;
+            height: 100%;
+            left: 50%;
+            transform: translateX(-50%);
+        }
+
+        .road-marking {
+            position: absolute;
+            background-color: #fff;
+        }
+
+        .horizontal-marking {
+            width: 30px;
+            height: 4px;
+            top: 50%;
+            transform: translateY(-50%);
+        }
+
+        .vertical-marking {
+            width: 4px;
+            height: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+        }
+
+        .signal {
+            position: absolute;
+            width: 70px;
+            height: 180px;
+            background-color: #2f3542;
+            border-radius: 8px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: space-around;
+            padding: 15px 0;
+            box-shadow: 0 6px 12px rgba(0, 0, 0, 0.3);
+            border: 2px solid #555;
+        }
+
+        .signal-light {
+            width: 35px;
+            height: 35px;
+            border-radius: 50%;
+            background-color: #3d3d3d;
+            transition: all 0.3s ease;
+            border: 2px solid #666;
+        }
+
+        .signal-light.active.red {
+            background-color: var(--red);
+            box-shadow: 0 0 20px var(--red);
+            border-color: var(--red);
+        }
+
+        .signal-light.active.yellow {
+            background-color: var(--yellow);
+            box-shadow: 0 0 20px var(--yellow);
+            border-color: var(--yellow);
+        }
+
+        .signal-light.active.green {
+            background-color: var(--green);
+            box-shadow: 0 0 20px var(--green);
+            border-color: var(--green);
+        }
+
+        .signal-light.blinking {
+            animation: blink 1s infinite;
+        }
+
+        @keyframes blink {
+            0%, 49% { opacity: 1; }
+            50%, 100% { opacity: 0.3; }
+        }
+
+        .signal-1 { top: 10%; left: 15%; }
+        .signal-2 { top: 10%; right: 15%; }
+        .signal-3 { bottom: 10%; left: 15%; }
+        .signal-4 { bottom: 10%; right: 15%; }
+
+        .pedestrian-signal {
+            position: absolute;
+            width: 50px;
+            height: 120px;
+            background-color: #2f3542;
+            border-radius: 8px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: space-around;
+            padding: 10px 0;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);
+            border: 2px solid #555;
+        }
+
+        .pedestrian-light {
+            width: 25px;
+            height: 25px;
+            border-radius: 50%;
+            background-color: #3d3d3d;
+            transition: all 0.3s ease;
+            border: 2px solid #666;
+        }
+
+        .pedestrian-light.active.red {
+            background-color: var(--red);
+            box-shadow: 0 0 15px var(--red);
+            border-color: var(--red);
+        }
+
+        .pedestrian-light.active.green {
+            background-color: var(--green);
+            box-shadow: 0 0 15px var(--green);
+            border-color: var(--green);
+        }
+
+        .pedestrian-light.active.yellow {
+            background-color: var(--yellow);
+            box-shadow: 0 0 15px var(--yellow);
+            border-color: var(--yellow);
+        }
+
+        .pedestrian-light.yellow {
+            background-color: var(--yellow) !important;
+            box-shadow: 0 0 15px var(--yellow) !important;
+            border-color: var(--yellow) !important;
+        }
+
+        .pedestrian-1 { top: 5%; left: 35%; }
+        .pedestrian-2 { top: 5%; right: 35%; }
+        .pedestrian-3 { bottom: 5%; left: 35%; }
+        .pedestrian-4 { bottom: 5%; right: 35%; }
+
+        .status-panel {
+            background-color: var(--dark);
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        .status-item {
+            margin-bottom: 15px;
+            padding: 15px;
+            background-color: #57606f;
+            border-radius: 8px;
+            border-left: 4px solid var(--blue);
+        }
+
+        .status-item h3 {
+            margin-bottom: 8px;
+            color: var(--light);
+        }
+
+        .event-log {
+            max-height: 300px;
+            overflow-y: auto;
+            background-color: #2f3542;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 20px;
+            border: 2px solid #555;
+        }
+
+        .log-entry {
+            padding: 8px;
+            margin-bottom: 8px;
+            border-radius: 4px;
+            font-size: 0.9rem;
+            border-left: 4px solid;
+        }
+
+        .log-normal {
+            background-color: rgba(46, 134, 222, 0.2);
+            border-left-color: #2e86de;
+        }
+
+        .log-vip {
+            background-color: rgba(255, 159, 67, 0.2);
+            border-left-color: #ff9f43;
+        }
+
+        .log-deadlock {
+            background-color: rgba(255, 71, 87, 0.2);
+            border-left-color: var(--red);
+        }
+
+        .log-change {
+            background-color: rgba(16, 172, 132, 0.2);
+            border-left-color: #10ac84;
+        }
+
+        .controls {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            margin-top: 20px;
+        }
+
+        .controls h3 {
+            margin-bottom: 10px;
+            color: var(--light);
+        }
+
+        button {
+            padding: 12px 20px;
+            border: none;
+            border-radius: 8px;
+            background-color: var(--blue);
+            color: white;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-weight: 600;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        button:hover {
+            background-color: #1e40af;
+            transform: translateY(-2px);
+            box-shadow: 0 6px 12px rgba(0, 0, 0, 0.2);
+        }
+
+        button:active {
+            transform: translateY(0);
+        }
+
+        .vip-indicator {
+            position: absolute;
+            width: 40px;
+            height: 40px;
+            background: linear-gradient(45deg, gold, #ffa500);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            color: #000;
+            box-shadow: 0 0 20px gold;
+            animation: pulse 2s infinite;
+            border: 3px solid #fff;
+        }
+
+        @keyframes pulse {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.1); }
+            100% { transform: scale(1); }
+        }
+
+        .deadlock-indicator {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 120px;
+            height: 120px;
+            background: radial-gradient(circle, rgba(255, 71, 87, 0.8), rgba(255, 71, 87, 0.4));
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            color: white;
+            box-shadow: 0 0 40px var(--red);
+            animation: alarm 1s infinite;
+            border: 4px solid var(--red);
+        }
+
+        @keyframes alarm {
+            0%, 100% {
+                opacity: 1;
+                transform: translate(-50%, -50%) scale(1);
+            }
+            50% {
+                opacity: 0.7;
+                transform: translate(-50%, -50%) scale(1.05);
+            }
+        }
+
+        .connection-status {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            padding: 8px 16px;
+            border-radius: 25px;
+            font-size: 0.9rem;
+            font-weight: 600;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        .connected {
+            background-color: var(--green);
+            color: white;
+        }
+
+        .disconnected {
+            background-color: var(--red);
+            color: white;
+            animation: blink 2s infinite;
+        }
+
+        .signal-label {
+            position: absolute;
+            background-color: rgba(0, 0, 0, 0.8);
+            color: white;
+            padding: 6px 10px;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: bold;
+            text-align: center;
+            min-width: 80px;
+            border: 1px solid var(--blue);
+        }
+
+        .signal-1 .signal-label { top: -35px; left: 50%; transform: translateX(-50%); }
+        .signal-2 .signal-label { top: -35px; left: 50%; transform: translateX(-50%); }
+        .signal-3 .signal-label { bottom: -35px; left: 50%; transform: translateX(-50%); }
+        .signal-4 .signal-label { bottom: -35px; left: 50%; transform: translateX(-50%); }
+
+        .pedestrian-label {
+            position: absolute;
+            background-color: rgba(0, 100, 0, 0.8);
+            color: white;
+            padding: 4px 8px;
+            border-radius: 3px;
+            font-size: 0.65rem;
+            font-weight: bold;
+            text-align: center;
+            min-width: 70px;
+            border: 1px solid var(--green);
+        }
+
+        .pedestrian-1 .pedestrian-label { top: -30px; left: 50%; transform: translateX(-50%); }
+        .pedestrian-2 .pedestrian-label { top: -30px; left: 50%; transform: translateX(-50%); }
+        .pedestrian-3 .pedestrian-label { bottom: -30px; left: 50%; transform: translateX(-50%); }
+        .pedestrian-4 .pedestrian-label { bottom: -30px; left: 50%; transform: translateX(-50%); }
+
+        .junction-indicator {
+            position: absolute;
+            background-color: rgba(55, 66, 250, 0.9);
+            color: white;
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 0.8rem;
+            font-weight: bold;
+            border: 2px solid var(--blue);
+        }
+
+        .junction-12 { top: -10px; left: 10px; }
+        .junction-34 { bottom: -10px; right: 10px; }
+
+        @media (max-width: 768px) {
+            .container {
+                grid-template-columns: 1fr;
+            }
+
+            .intersection-grid {
+                width: 300px;
+                height: 300px;
+            }
+
+            .signal {
+                width: 50px;
+                height: 140px;
+            }
+
+            .signal-light {
+                width: 25px;
+                height: 25px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Traffic Signal Control System</h1>
+        <p>Real-time monitoring with Ricart-Agrawala distributed algorithm</p>
+    </header>
+
+    <div class="container">
+        <div class="intersection">
+            <div class="intersection-grid">
+                <!-- Roads -->
+                <div class="road horizontal-road"></div>
+                <div class="road vertical-road"></div>
+
+                <!-- Road markings -->
+                <div class="road-marking horizontal-marking" style="left: 100px;"></div>
+                <div class="road-marking horizontal-marking" style="right: 100px;"></div>
+                <div class="road-marking vertical-marking" style="top: 100px;"></div>
+                <div class="road-marking vertical-marking" style="bottom: 100px;"></div>
+
+                <!-- Traffic Signals -->
+                <div class="signal signal-1" id="signal-1">
+                    <div class="signal-label">Traffic S1<br>Junction 1-2</div>
+                    <div class="signal-light red" id="signal-1-red"></div>
+                    <div class="signal-light yellow" id="signal-1-yellow"></div>
+                    <div class="signal-light green" id="signal-1-green"></div>
+                </div>
+
+                <div class="signal signal-2" id="signal-2">
+                    <div class="signal-label">Traffic S2<br>Junction 1-2</div>
+                    <div class="signal-light red" id="signal-2-red"></div>
+                    <div class="signal-light yellow" id="signal-2-yellow"></div>
+                    <div class="signal-light green" id="signal-2-green"></div>
+                </div>
+
+                <div class="signal signal-3" id="signal-3">
+                    <div class="signal-label">Traffic S3<br>Junction 3-4</div>
+                    <div class="signal-light red" id="signal-3-red"></div>
+                    <div class="signal-light yellow" id="signal-3-yellow"></div>
+                    <div class="signal-light green" id="signal-3-green"></div>
+                </div>
+
+                <div class="signal signal-4" id="signal-4">
+                    <div class="signal-label">Traffic S4<br>Junction 3-4</div>
+                    <div class="signal-light red" id="signal-4-red"></div>
+                    <div class="signal-light yellow" id="signal-4-yellow"></div>
+                    <div class="signal-light green" id="signal-4-green"></div>
+                </div>
+
+                <!-- Pedestrian Signals -->
+                <div class="pedestrian-signal pedestrian-1" id="pedestrian-1">
+                    <div class="pedestrian-label">Pedestrian P1<br>Junction 1-2</div>
+                    <div class="pedestrian-light red" id="pedestrian-1-red"></div>
+                    <div class="pedestrian-light green" id="pedestrian-1-green"></div>
+                </div>
+
+                <div class="pedestrian-signal pedestrian-2" id="pedestrian-2">
+                    <div class="pedestrian-label">Pedestrian P2<br>Junction 1-2</div>
+                    <div class="pedestrian-light red" id="pedestrian-2-red"></div>
+                    <div class="pedestrian-light green" id="pedestrian-2-green"></div>
+                </div>
+
+                <div class="pedestrian-signal pedestrian-3" id="pedestrian-3">
+                    <div class="pedestrian-label">Pedestrian P3<br>Junction 3-4</div>
+                    <div class="pedestrian-light red" id="pedestrian-3-red"></div>
+                    <div class="pedestrian-light green" id="pedestrian-3-green"></div>
+                </div>
+
+                <div class="pedestrian-signal pedestrian-4" id="pedestrian-4">
+                    <div class="pedestrian-label">Pedestrian P4<br>Junction 3-4</div>
+                    <div class="pedestrian-light red" id="pedestrian-4-red"></div>
+                    <div class="pedestrian-light green" id="pedestrian-4-green"></div>
+                </div>
+
+                <!-- Junction Indicators -->
+                <div class="junction-indicator junction-12">JUNCTION 1-2</div>
+                <div class="junction-indicator junction-34">JUNCTION 3-4</div>
+            </div>
+        </div>
+
+        <div class="status-panel">
+            <h2>System Status</h2>
+
+            <div class="status-item">
+                <h3>ZooKeeper Connection</h3>
+                <p id="controller-status">Checking...</p>
+                <p id="connection-details" style="font-size: 0.8rem; color: #aaa; margin-top: 5px;"></p>
+            </div>
+
+            <div class="status-item">
+                <h3>Current Mode</h3>
+                <p id="current-mode">Normal Operation</p>
+            </div>
+
+            <div class="status-item">
+                <h3>Active VIPs</h3>
+                <p id="active-vips">None</p>
+            </div>
+
+            <div class="status-item">
+                <h3>Last Update</h3>
+                <p id="last-update">Never</p>
+            </div>
+
+            <div class="controls">
+                <h3>Simulation Controls</h3>
+                <button id="simulate-traffic">Simulate Traffic Detection</button>
+                <button id="simulate-vip">Simulate VIP Arrival</button>
+                <button id="simulate-deadlock">Simulate Deadlock Scenario</button>
+            </div>
+
+            <div class="status-item">
+                <h3>Event Log</h3>
+                <div class="event-log" id="event-log">
+                    <div class="log-entry log-change">System initialized</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="connection-status" id="connection-status">Connecting...</div>
+
+    <script>
+        // Configuration
+        const UPDATE_INTERVAL = 2000; // Update every 2 seconds
+
+        // State variables
+        let signalStatus = {
+            "1": "RED", "2": "RED", "3": "GREEN", "4": "GREEN",
+            "P1": "GREEN", "P2": "GREEN", "P3": "RED", "P4": "RED"
+        };
+
+        let activeVIPs = {};
+        let deadlockActive = false;
+        let connectionStatus = false;
+
+        // DOM Elements
+        const connectionStatusEl = document.getElementById('connection-status');
+        const controllerStatusEl = document.getElementById('controller-status');
+        const connectionDetailsEl = document.getElementById('connection-details');
+        const currentModeEl = document.getElementById('current-mode');
+        const activeVIPsEl = document.getElementById('active-vips');
+        const lastUpdateEl = document.getElementById('last-update');
+        const eventLogEl = document.getElementById('event-log');
+        const intersectionEl = document.querySelector('.intersection-grid');
+
+        // Initialize signal elements mapping
+        const signalElements = {};
+
+        for (let i = 1; i <= 4; i++) {
+            signalElements[i.toString()] = {
+                red: document.getElementById(`signal-${i}-red`),
+                yellow: document.getElementById(`signal-${i}-yellow`),
+                green: document.getElementById(`signal-${i}-green`)
+            };
+        }
+
+        for (let i = 1; i <= 4; i++) {
+            signalElements[`P${i}`] = {
+                red: document.getElementById(`pedestrian-${i}-red`),
+                green: document.getElementById(`pedestrian-${i}-green`)
+            };
+        }
+
+        // Update signal display based on current status
+        function updateSignalDisplay() {
+            // Update traffic signals
+            for (let i = 1; i <= 4; i++) {
+                const status = signalStatus[i.toString()];
+                const elements = signalElements[i.toString()];
+
+                if (elements) {
+                    // Reset all
+                    elements.red.classList.remove('active');
+                    elements.yellow.classList.remove('active');
+                    elements.green.classList.remove('active');
+
+                    // Activate current status
+                    if (status === 'RED') elements.red.classList.add('active');
+                    if (status === 'YELLOW') elements.yellow.classList.add('active');
+                    if (status === 'GREEN') elements.green.classList.add('active');
+                }
+            }
+
+            // Update pedestrian signals
+            for (let i = 1; i <= 4; i++) {
+                const status = signalStatus[`P${i}`];
+                const elements = signalElements[`P${i}`];
+
+                if (elements) {
+                    // Reset all
+                    elements.red.classList.remove('active', 'blinking');
+                    elements.green.classList.remove('active', 'blinking');
+
+                    // Activate current status
+                    if (status === 'RED') {
+                        elements.red.classList.add('active');
+                    } else if (status === 'BLINKING RED') {
+                        elements.red.classList.add('active', 'blinking');
+                    } else if (status === 'GREEN') {
+                        elements.green.classList.add('active');
+                    } else if (status === 'YELLOW') {
+                        elements.green.classList.add('active');
+                        elements.green.classList.add('yellow');
+                    } else if (status === 'OFF') {
+                        // Both lights off for blinking effect
+                    }
+                }
+            }
+
+            // Update VIP indicators
+            document.querySelectorAll('.vip-indicator').forEach(el => el.remove());
+
+            // Add new VIP indicators
+            for (const [direction, vip] of Object.entries(activeVIPs)) {
+                const vipEl = document.createElement('div');
+                vipEl.className = 'vip-indicator';
+                vipEl.textContent = 'VIP';
+                vipEl.style.top = direction === '12' ? '25%' : '75%';
+                vipEl.style.left = direction === '12' ? '25%' : '75%';
+                intersectionEl.appendChild(vipEl);
+            }
+
+            // Update deadlock indicator
+            const existingDeadlock = document.querySelector('.deadlock-indicator');
+            if (deadlockActive && !existingDeadlock) {
+                const deadlockEl = document.createElement('div');
+                deadlockEl.className = 'deadlock-indicator';
+                deadlockEl.textContent = 'DEADLOCK';
+                intersectionEl.appendChild(deadlockEl);
+            } else if (!deadlockActive && existingDeadlock) {
+                existingDeadlock.remove();
+            }
+        }
+
+        // Add event to log
+        function addEventToLog(message, type = 'normal') {
+            const entry = document.createElement('div');
+            entry.className = `log-entry log-${type}`;
+            entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            eventLogEl.insertBefore(entry, eventLogEl.firstChild);
+
+            // Keep only the last 50 entries
+            while (eventLogEl.children.length > 50) {
+                eventLogEl.removeChild(eventLogEl.lastChild);
+            }
+        }
+
+        // Fetch current status from Flask API
+        async function fetchStatus() {
+            try {
+                const response = await fetch('/api/status');
+                const data = await response.json();
+
+                if (response.ok) {
+                    // Update signal status
+                    if (data.signal_status) {
+                        signalStatus = data.signal_status;
+                    }
+
+                    // Update connection status
+                    connectionStatus = data.connection_status || false;
+
+                    // Update active VIPs
+                    activeVIPs = data.active_vips || {};
+
+                    // Update deadlock status
+                    deadlockActive = data.deadlock_active || false;
+
+                    // Update UI elements
+                    connectionStatusEl.textContent = connectionStatus ? 'Connected' : 'Disconnected';
+                    connectionStatusEl.className = `connection-status ${connectionStatus ? 'connected' : 'disconnected'}`;
+
+                    if (connectionStatus) {
+                        controllerStatusEl.textContent = 'ZooKeeper Connected';
+                        connectionDetailsEl.textContent = 'All systems operational';
+                    } else {
+                        controllerStatusEl.textContent = 'ZooKeeper Disconnected';
+                        connectionDetailsEl.textContent = 'Check if ZooKeeper is running on port 6000';
+                    }
+
+                    const vipCount = Object.keys(activeVIPs).length;
+                    activeVIPsEl.textContent = vipCount > 0 ? `${vipCount} VIP(s) active` : 'None';
+
+                    currentModeEl.textContent = deadlockActive ? 'Deadlock Resolution' : 'Normal Operation';
+                    currentModeEl.style.color = deadlockActive ? 'var(--red)' : '';
+
+                    lastUpdateEl.textContent = new Date().toLocaleTimeString();
+
+                    // Update display
+                    updateSignalDisplay();
+
+                } else {
+                    throw new Error(data.error || 'Failed to fetch status');
+                }
+
+            } catch (error) {
+                console.error('Error fetching status:', error);
+                connectionStatus = false;
+                connectionStatusEl.textContent = 'Connection Error';
+                connectionStatusEl.className = 'connection-status disconnected';
+                controllerStatusEl.textContent = 'Flask server connection error';
+                connectionDetailsEl.textContent = `Error: ${error.message}`;
+
+                addEventToLog('Connection error: ' + error.message, 'normal');
+            }
+        }
+
+        // Simulate traffic detection
+        async function simulateTraffic() {
+            try {
+                const response = await fetch('/api/simulate/traffic', {
+                    method: 'POST'
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    addEventToLog(`Traffic simulated for signals ${data.target_pair.join('-')}`, 'normal');
+                } else {
+                    addEventToLog(`Traffic simulation failed: ${data.error}`, 'normal');
+                }
+
+            } catch (error) {
+                addEventToLog('Error simulating traffic: ' + error.message, 'normal');
+            }
+        }
+
+        // Simulate VIP arrival
+        async function simulateVIP() {
+            try {
+                const response = await fetch('/api/simulate/vip', {
+                    method: 'POST'
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    addEventToLog(`VIP ${data.vehicle_id} (Priority ${data.priority}) for signals ${data.target_pair.join('-')}`, 'vip');
+                } else {
+                    addEventToLog(`VIP simulation failed: ${data.error}`, 'vip');
+                }
+
+            } catch (error) {
+                addEventToLog('Error simulating VIP: ' + error.message, 'vip');
+            }
+        }
+
+        // Simulate deadlock
+        async function simulateDeadlock() {
+            try {
+                const response = await fetch('/api/simulate/deadlock', {
+                    method: 'POST'
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    addEventToLog(`Deadlock scenario created: ${data.vip1.vehicle_id} vs ${data.vip2.vehicle_id}`, 'deadlock');
+                    addEventToLog(data.message, 'deadlock');
+                } else {
+                    addEventToLog(`Deadlock simulation failed: ${data.error}`, 'deadlock');
+                }
+
+            } catch (error) {
+                addEventToLog('Error simulating deadlock: ' + error.message, 'deadlock');
+            }
+        }
+
+        // Initialize event listeners
+        document.getElementById('simulate-traffic').addEventListener('click', simulateTraffic);
+        document.getElementById('simulate-vip').addEventListener('click', simulateVIP);
+        document.getElementById('simulate-deadlock').addEventListener('click', simulateDeadlock);
+
+        // Initial setup
+        updateSignalDisplay();
+        addEventToLog('Frontend interface initialized', 'change');
+
+        // Start periodic status updates
+        setInterval(fetchStatus, UPDATE_INTERVAL);
+        fetchStatus(); // Initial fetch
+    </script>
+</body>
