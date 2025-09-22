@@ -51,11 +51,11 @@
 
         .intersection {
             background-color: var(--dark);
-            padding: 40px;
+            padding: 80px;
             border-radius: 10px;
             box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
             position: relative;
-            min-height: 500px;
+            min-height: 800px;
             display: flex;
             align-items: center;
             justify-content: center;
@@ -63,8 +63,8 @@
 
         .intersection-grid {
             position: relative;
-            width: 400px;
-            height: 400px;
+            width: 750px;
+            height: 750px;
         }
 
         .road {
@@ -75,13 +75,13 @@
 
         .horizontal-road {
             width: 100%;
-            height: 60px;
+            height: 100px;
             top: 50%;
             transform: translateY(-50%);
         }
 
         .vertical-road {
-            width: 60px;
+            width: 100px;
             height: 100%;
             left: 50%;
             transform: translateX(-50%);
@@ -93,37 +93,37 @@
         }
 
         .horizontal-marking {
-            width: 30px;
-            height: 4px;
+            width: 40px;
+            height: 6px;
             top: 50%;
             transform: translateY(-50%);
         }
 
         .vertical-marking {
-            width: 4px;
-            height: 30px;
+            width: 6px;
+            height: 40px;
             left: 50%;
             transform: translateX(-50%);
         }
 
         .signal {
             position: absolute;
-            width: 70px;
-            height: 180px;
+            width: 80px;
+            height: 200px;
             background-color: #2f3542;
             border-radius: 8px;
             display: flex;
             flex-direction: column;
             align-items: center;
             justify-content: space-around;
-            padding: 15px 0;
+            padding: 20px 0;
             box-shadow: 0 6px 12px rgba(0, 0, 0, 0.3);
             border: 2px solid #555;
         }
 
         .signal-light {
-            width: 35px;
-            height: 35px;
+            width: 40px;
+            height: 40px;
             border-radius: 50%;
             background-color: #3d3d3d;
             transition: all 0.3s ease;
@@ -132,19 +132,19 @@
 
         .signal-light.active.red {
             background-color: var(--red);
-            box-shadow: 0 0 20px var(--red);
+            box-shadow: 0 0 25px var(--red);
             border-color: var(--red);
         }
 
         .signal-light.active.yellow {
             background-color: var(--yellow);
-            box-shadow: 0 0 20px var(--yellow);
+            box-shadow: 0 0 25px var(--yellow);
             border-color: var(--yellow);
         }
 
         .signal-light.active.green {
             background-color: var(--green);
-            box-shadow: 0 0 20px var(--green);
+            box-shadow: 0 0 25px var(--green);
             border-color: var(--green);
         }
 
@@ -157,29 +157,30 @@
             50%, 100% { opacity: 0.3; }
         }
 
-        .signal-1 { top: 10%; left: 15%; }
-        .signal-2 { top: 10%; right: 15%; }
-        .signal-3 { bottom: 10%; left: 15%; }
-        .signal-4 { bottom: 10%; right: 15%; }
+        /* More spread out signal positioning */
+        .signal-1 { top: 2%; left: 5%; }
+        .signal-2 { top: 2%; right: 5%; }
+        .signal-3 { bottom: 2%; left: 5%; }
+        .signal-4 { bottom: 2%; right: 5%; }
 
         .pedestrian-signal {
             position: absolute;
-            width: 50px;
-            height: 120px;
+            width: 60px;
+            height: 140px;
             background-color: #2f3542;
             border-radius: 8px;
             display: flex;
             flex-direction: column;
             align-items: center;
             justify-content: space-around;
-            padding: 10px 0;
+            padding: 15px 0;
             box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);
             border: 2px solid #555;
         }
 
         .pedestrian-light {
-            width: 25px;
-            height: 25px;
+            width: 30px;
+            height: 30px;
             border-radius: 50%;
             background-color: #3d3d3d;
             transition: all 0.3s ease;
@@ -188,32 +189,33 @@
 
         .pedestrian-light.active.red {
             background-color: var(--red);
-            box-shadow: 0 0 15px var(--red);
+            box-shadow: 0 0 20px var(--red);
             border-color: var(--red);
         }
 
         .pedestrian-light.active.green {
             background-color: var(--green);
-            box-shadow: 0 0 15px var(--green);
+            box-shadow: 0 0 20px var(--green);
             border-color: var(--green);
         }
 
         .pedestrian-light.active.yellow {
             background-color: var(--yellow);
-            box-shadow: 0 0 15px var(--yellow);
+            box-shadow: 0 0 20px var(--yellow);
             border-color: var(--yellow);
         }
 
         .pedestrian-light.yellow {
             background-color: var(--yellow) !important;
-            box-shadow: 0 0 15px var(--yellow) !important;
+            box-shadow: 0 0 20px var(--yellow) !important;
             border-color: var(--yellow) !important;
         }
 
-        .pedestrian-1 { top: 5%; left: 35%; }
-        .pedestrian-2 { top: 5%; right: 35%; }
-        .pedestrian-3 { bottom: 5%; left: 35%; }
-        .pedestrian-4 { bottom: 5%; right: 35%; }
+        /* More spread out pedestrian positioning */
+        .pedestrian-1 { top: 1%; left: 20%; }
+        .pedestrian-2 { top: 1%; right: 20%; }
+        .pedestrian-3 { bottom: 1%; left: 20%; }
+        .pedestrian-4 { bottom: 1%; right: 20%; }
 
         .status-panel {
             background-color: var(--dark);
@@ -309,8 +311,8 @@
 
         .vip-indicator {
             position: absolute;
-            width: 40px;
-            height: 40px;
+            width: 50px;
+            height: 50px;
             background: linear-gradient(45deg, gold, #ffa500);
             border-radius: 50%;
             display: flex;
@@ -318,9 +320,10 @@
             justify-content: center;
             font-weight: bold;
             color: #000;
-            box-shadow: 0 0 20px gold;
+            box-shadow: 0 0 25px gold;
             animation: pulse 2s infinite;
             border: 3px solid #fff;
+            font-size: 0.8rem;
         }
 
         @keyframes pulse {
@@ -334,8 +337,8 @@
             top: 50%;
             left: 50%;
             transform: translate(-50%, -50%);
-            width: 120px;
-            height: 120px;
+            width: 140px;
+            height: 140px;
             background: radial-gradient(circle, rgba(255, 71, 87, 0.8), rgba(255, 71, 87, 0.4));
             border-radius: 50%;
             display: flex;
@@ -343,9 +346,10 @@
             justify-content: center;
             font-weight: bold;
             color: white;
-            box-shadow: 0 0 40px var(--red);
+            box-shadow: 0 0 50px var(--red);
             animation: alarm 1s infinite;
             border: 4px solid var(--red);
+            font-size: 1.1rem;
         }
 
         @keyframes alarm {
@@ -383,72 +387,105 @@
 
         .signal-label {
             position: absolute;
-            background-color: rgba(0, 0, 0, 0.8);
-            color: white;
-            padding: 6px 10px;
-            border-radius: 4px;
-            font-size: 0.75rem;
-            font-weight: bold;
-            text-align: center;
-            min-width: 80px;
-            border: 1px solid var(--blue);
-        }
-
-        .signal-1 .signal-label { top: -35px; left: 50%; transform: translateX(-50%); }
-        .signal-2 .signal-label { top: -35px; left: 50%; transform: translateX(-50%); }
-        .signal-3 .signal-label { bottom: -35px; left: 50%; transform: translateX(-50%); }
-        .signal-4 .signal-label { bottom: -35px; left: 50%; transform: translateX(-50%); }
-
-        .pedestrian-label {
-            position: absolute;
-            background-color: rgba(0, 100, 0, 0.8);
-            color: white;
-            padding: 4px 8px;
-            border-radius: 3px;
-            font-size: 0.65rem;
-            font-weight: bold;
-            text-align: center;
-            min-width: 70px;
-            border: 1px solid var(--green);
-        }
-
-        .pedestrian-1 .pedestrian-label { top: -30px; left: 50%; transform: translateX(-50%); }
-        .pedestrian-2 .pedestrian-label { top: -30px; left: 50%; transform: translateX(-50%); }
-        .pedestrian-3 .pedestrian-label { bottom: -30px; left: 50%; transform: translateX(-50%); }
-        .pedestrian-4 .pedestrian-label { bottom: -30px; left: 50%; transform: translateX(-50%); }
-
-        .junction-indicator {
-            position: absolute;
-            background-color: rgba(55, 66, 250, 0.9);
+            background-color: rgba(0, 0, 0, 0.9);
             color: white;
             padding: 8px 12px;
             border-radius: 6px;
             font-size: 0.8rem;
             font-weight: bold;
+            text-align: center;
+            min-width: 100px;
             border: 2px solid var(--blue);
+            white-space: nowrap;
         }
 
-        .junction-12 { top: -10px; left: 10px; }
-        .junction-34 { bottom: -10px; right: 10px; }
+        /* More spaced out label positioning */
+        .signal-1 .signal-label { top: -60px; left: 50%; transform: translateX(-50%); }
+        .signal-2 .signal-label { top: -60px; left: 50%; transform: translateX(-50%); }
+        .signal-3 .signal-label { bottom: -60px; left: 50%; transform: translateX(-50%); }
+        .signal-4 .signal-label { bottom: -60px; left: 50%; transform: translateX(-50%); }
+
+        .pedestrian-label {
+            position: absolute;
+            background-color: rgba(0, 100, 0, 0.9);
+            color: white;
+            padding: 6px 10px;
+            border-radius: 4px;
+            font-size: 0.7rem;
+            font-weight: bold;
+            text-align: center;
+            min-width: 90px;
+            border: 2px solid var(--green);
+            white-space: nowrap;
+        }
+
+        /* More spaced out pedestrian label positioning */
+        .pedestrian-1 .pedestrian-label { top: -55px; left: 50%; transform: translateX(-50%); }
+        .pedestrian-2 .pedestrian-label { top: -55px; left: 50%; transform: translateX(-50%); }
+        .pedestrian-3 .pedestrian-label { bottom: -55px; left: 50%; transform: translateX(-50%); }
+        .pedestrian-4 .pedestrian-label { bottom: -55px; left: 50%; transform: translateX(-50%); }
+
+        .junction-indicator {
+            position: absolute;
+            background-color: rgba(55, 66, 250, 0.95);
+            color: white;
+            padding: 10px 15px;
+            border-radius: 8px;
+            font-size: 0.9rem;
+            font-weight: bold;
+            border: 3px solid var(--blue);
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+        }
+
+        /* More spaced out junction indicators */
+        .junction-12 { top: -25px; left: 25px; }
+        .junction-34 { bottom: -25px; right: 25px; }
+
+        @media (max-width: 1200px) {
+            .intersection-grid {
+                width: 600px;
+                height: 600px;
+            }
+        }
 
         @media (max-width: 768px) {
             .container {
                 grid-template-columns: 1fr;
             }
 
+            .intersection {
+                padding: 40px 20px;
+            }
+
             .intersection-grid {
-                width: 300px;
-                height: 300px;
+                width: 450px;
+                height: 450px;
             }
 
             .signal {
-                width: 50px;
-                height: 140px;
+                width: 60px;
+                height: 160px;
             }
 
             .signal-light {
-                width: 25px;
-                height: 25px;
+                width: 30px;
+                height: 30px;
+            }
+
+            .pedestrian-signal {
+                width: 45px;
+                height: 120px;
+            }
+
+            .pedestrian-light {
+                width: 22px;
+                height: 22px;
+            }
+
+            .signal-label, .pedestrian-label {
+                font-size: 0.65rem;
+                padding: 4px 8px;
+                min-width: 70px;
             }
         }
     </style>
@@ -467,10 +504,10 @@
                 <div class="road vertical-road"></div>
 
                 <!-- Road markings -->
-                <div class="road-marking horizontal-marking" style="left: 100px;"></div>
-                <div class="road-marking horizontal-marking" style="right: 100px;"></div>
-                <div class="road-marking vertical-marking" style="top: 100px;"></div>
-                <div class="road-marking vertical-marking" style="bottom: 100px;"></div>
+                <div class="road-marking horizontal-marking" style="left: 160px;"></div>
+                <div class="road-marking horizontal-marking" style="right: 160px;"></div>
+                <div class="road-marking vertical-marking" style="top: 160px;"></div>
+                <div class="road-marking vertical-marking" style="bottom: 160px;"></div>
 
                 <!-- Traffic Signals -->
                 <div class="signal signal-1" id="signal-1">
@@ -670,8 +707,8 @@
                 const vipEl = document.createElement('div');
                 vipEl.className = 'vip-indicator';
                 vipEl.textContent = 'VIP';
-                vipEl.style.top = direction === '12' ? '25%' : '75%';
-                vipEl.style.left = direction === '12' ? '25%' : '75%';
+                vipEl.style.top = direction === '12' ? '15%' : '85%';
+                vipEl.style.left = direction === '12' ? '15%' : '85%';
                 intersectionEl.appendChild(vipEl);
             }
 
@@ -795,7 +832,7 @@
                     addEventToLog(`VIP simulation failed: ${data.error}`, 'vip');
                 }
 
-            } catch (error) {
+                            } catch (error) {
                 addEventToLog('Error simulating VIP: ' + error.message, 'vip');
             }
         }
