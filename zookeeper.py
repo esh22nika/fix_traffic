@@ -103,7 +103,22 @@ class DatabaseManager:
                     status TEXT
                 )
             ''')
-
+            conn.execute('''
+                        CREATE TABLE IF NOT EXISTS signal_change_history (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            signal_id TEXT,
+                            old_status TEXT,
+                            new_status TEXT,
+                            change_source TEXT,
+                            change_reason TEXT,
+                            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    ''')
+            try:
+                conn.execute('ALTER TABLE signal_status ADD COLUMN last_source TEXT')
+                conn.execute('ALTER TABLE signal_status ADD COLUMN last_reason TEXT')
+            except sqlite3.OperationalError:
+                pass  # Columns already exist
             # Initialize default signal status
             default_signals = {
                 '1': 'RED', '2': 'RED', '3': 'GREEN', '4': 'GREEN',
@@ -155,6 +170,83 @@ class DatabaseManager:
                     'timestamp': time.time()
                 }
 
+    def update_signal_status_with_reason(self, signal_status_dict, source, reason):
+        """Update signal status with source attribution"""
+        with self.lock:
+            with sqlite3.connect(self.db_path) as conn:
+                for signal_id, status in signal_status_dict.items():
+                    signal_id_str = str(signal_id)
+
+                    # Get current status for history
+                    cursor = conn.execute(
+                        'SELECT status FROM signal_status WHERE signal_id = ?',
+                        (signal_id_str,)
+                    )
+                    result = cursor.fetchone()
+                    old_status = result[0] if result else "UNKNOWN"
+
+                    # Update current status with source
+                    conn.execute(
+                        '''INSERT OR REPLACE INTO signal_status 
+                           (signal_id, status, last_updated, last_source, last_reason) 
+                           VALUES (?, ?, CURRENT_TIMESTAMP, ?, ?)''',
+                        (signal_id_str, status, source, reason)
+                    )
+
+                    # Log to history table
+                    if old_status != status:
+                        conn.execute(
+                            '''INSERT INTO signal_change_history 
+                               (signal_id, old_status, new_status, change_source, change_reason)
+                               VALUES (?, ?, ?, ?, ?)''',
+                            (signal_id_str, old_status, status, source, reason)
+                        )
+
+                conn.commit()
+        return "OK"
+
+    def get_signal_status_with_history(self, limit=50):
+        """Get current signal status with recent change history"""
+        with self.lock:
+            with sqlite3.connect(self.db_path) as conn:
+                # Current status
+                cursor = conn.execute('''
+                    SELECT signal_id, status, last_source, last_reason, last_updated 
+                    FROM signal_status 
+                    ORDER BY signal_id
+                ''')
+                current_status = {}
+                for row in cursor.fetchall():
+                    current_status[row[0]] = {
+                        'status': row[1],
+                        'source': row[2] or 'unknown',
+                        'reason': row[3] or 'unknown',
+                        'last_updated': row[4]
+                    }
+
+                # Recent changes
+                cursor = conn.execute('''
+                    SELECT signal_id, old_status, new_status, change_source, change_reason, timestamp
+                    FROM signal_change_history 
+                    ORDER BY timestamp DESC 
+                    LIMIT ?
+                ''', (limit,))
+
+                change_history = []
+                for row in cursor.fetchall():
+                    change_history.append({
+                        'signal_id': row[0],
+                        'old_status': row[1],
+                        'new_status': row[2],
+                        'source': row[3],
+                        'reason': row[4],
+                        'timestamp': row[5]
+                    })
+
+                return {
+                    'current_status': current_status,
+                    'recent_changes': change_history
+                }
 
 # COMMENTED OUT: GFS functionality moved to master_server
 '''
@@ -890,6 +982,15 @@ class ZooKeeperLoadBalancer:
             return [1, 2]
         return [3, 4]  # Default
 
+    def update_signal_status_with_reason(self, signal_status, source, reason):
+        """RPC method to update signals with attribution"""
+        self.db.update_signal_status_with_reason(signal_status, source, reason)
+        logger.info(f"[DB-UPDATE] Signal status updated by {source}: {reason}")
+        return "OK"
+
+    def get_signal_status_with_history(self, limit=50):
+        """RPC method to get status with history"""
+        return self.db.get_signal_status_with_history(limit)
     # ====== UTILITY METHODS ======
     def ping(self):
         active_controllers = sum(1 for c in self.controllers.values() if c.is_available)
@@ -987,7 +1088,9 @@ if __name__ == "__main__":
     # server.register_function(lb.get_system_status, "get_system_status")  # COMMENTED OUT: moved to master_server
     server.register_function(lb.update_signal_status, "update_signal_status")
     server.register_function(lb.get_signal_status, "get_signal_status")
-
+    # Add these after the existing register_function calls
+    server.register_function(lb.update_signal_status_with_reason, "update_signal_status_with_reason")
+    server.register_function(lb.get_signal_status_with_history, "get_signal_status_with_history")
     log_memory_usage()
 
     # Set the ready flag once all initialization is complete

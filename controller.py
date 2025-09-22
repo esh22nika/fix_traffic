@@ -1,4 +1,4 @@
-# controller.py - Full Ricart-Agrawala Implementation with Enhanced Logging
+# controller.py - Full Ricart-Agrawala Implementation with Enhanced Logging and ZooKeeper Database Integration
 from xmlrpc.server import SimpleXMLRPCServer
 from xmlrpc.client import ServerProxy, Transport
 import time
@@ -114,6 +114,24 @@ def get_zookeeper_proxy():
     """Get ZooKeeper connection"""
     return ServerProxy(ZOOKEEPER_URL, allow_none=True,
                        transport=TimeoutTransport(RESPONSE_TIMEOUT))
+
+
+# ====== ZOOKEEPER DATABASE INTEGRATION ======
+def update_zookeeper_signals_with_reason(reason):
+    """Push current signal status to ZooKeeper database with reason"""
+    try:
+        zk_proxy = get_zookeeper_proxy()
+        with state_lock:
+            current_status = signal_status.copy()
+        # Include source and reason in the update
+        result = zk_proxy.update_signal_status_with_reason(
+            current_status,
+            CONTROLLER_NAME,  # "CONTROLLER" or "CONTROLLER_CLONE"
+            reason
+        )
+        print(f"[{CONTROLLER_NAME}] Updated ZooKeeper database: {result}")
+    except Exception as e:
+        print(f"[{CONTROLLER_NAME}] Failed to update ZooKeeper database: {e}")
 
 
 # ====== RICART-AGRAWALA IMPLEMENTATION ======
@@ -423,10 +441,13 @@ def handle_traffic_signals(target_pair):
     print(f"[{CONTROLLER_NAME}] 🟢 Traffic {target_pair} → GREEN")
 
 
-def _switch_to(target_pair):
-    """Perform full pedestrian + traffic signal transition"""
+def _switch_to(target_pair, change_reason="normal"):
+    """Perform full pedestrian + traffic signal transition with database update"""
     handle_pedestrian_signals(target_pair)
     handle_traffic_signals(target_pair)
+
+    # Immediately update ZooKeeper database with attribution
+    update_zookeeper_signals_with_reason(change_reason)
 
 
 # ====== MAIN TRAFFIC CONTROL LOGIC ======
@@ -461,8 +482,8 @@ def signal_controller(target_pair):
     try:
         print(f"[CRITICAL-SECTION] Normal traffic ACQUIRED intersection mutex for {target_pair} [{CONTROLLER_NAME}]")
 
-        # Perform signal changes
-        _switch_to(target_pair)
+        # Perform signal changes with reason
+        _switch_to(target_pair, "normal_traffic_flow")
 
         print(f"[CRITICAL-SECTION] Normal traffic RELEASED intersection mutex [{CONTROLLER_NAME}]")
         print(f"[{CONTROLLER_NAME}] ✅ Completed normal signal cycle.")
@@ -517,8 +538,8 @@ def vip_arrival(target_pair, priority=1, vehicle_id=None):
         if not _get_pedestrian_ack(target_pair, "VIP", requester_info):
             return False
 
-        # Perform signal changes
-        _switch_to(target_pair)
+        # Perform signal changes with VIP reason
+        _switch_to(target_pair, f"vip_priority_{priority}_{vehicle_id}")
 
         # VIP crossing time
         print(f"[{CONTROLLER_NAME}] VIP {vehicle_id} crossing...")
@@ -572,5 +593,3 @@ if __name__ == "__main__":
         server.serve_forever()
     except KeyboardInterrupt:
         print(f"\n[{CONTROLLER_NAME}] Shutting down...")
-
-

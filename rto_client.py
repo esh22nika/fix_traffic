@@ -137,7 +137,7 @@ class RTOClient:
             return None, 0
 
     def write_data_to_system(self, locked_servers, data_type, new_data):
-        """Write data to all replicas - FIXED VERSION"""
+        """Write data to all replicas with attribution"""
         try:
             start_time = time.time()
             successful_writes = 0
@@ -152,7 +152,12 @@ class RTOClient:
                     proxy = self._get_proxy(server_url)
 
                     if data_type == "signal_status":
-                        result = proxy.update_signal_status(new_data)
+                        # Include RTO client as source
+                        result = proxy.update_signal_status_with_reason(
+                            new_data,
+                            self.client_id,
+                            "rto_manual_override"
+                        )
                     elif data_type == "system_status":
                         controller_name = f"controller_{random.randint(1, 3)}"
                         is_available = new_data.get('is_available', False)

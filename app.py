@@ -148,10 +148,21 @@ def index():
 
 @app.route('/api/status')
 def get_status():
-    """API endpoint to get current status"""
+    """API endpoint to get current status with attribution"""
     try:
+        proxy = get_zookeeper_proxy()
+        if proxy and connection_status:
+            enhanced_status = proxy.get_signal_status_with_history(20)  # Last 20 changes
+            current_status = enhanced_status['current_status']
+            recent_changes = enhanced_status['recent_changes']
+        else:
+            # Fallback to basic status
+            current_status = signal_status
+            recent_changes = []
+
         return jsonify({
-            'signal_status': signal_status,
+            'signal_status': current_status,
+            'recent_changes': recent_changes,
             'connection_status': connection_status,
             'active_vips': active_vips,
             'deadlock_active': deadlock_active,
@@ -159,18 +170,16 @@ def get_status():
         })
     except Exception as e:
         logger.error(f"Error in get_status: {e}")
+        # Fallback response
         return jsonify({
             'error': str(e),
-            'signal_status': {
-                "1": "RED", "2": "RED", "3": "GREEN", "4": "GREEN",
-                "P1": "GREEN", "P2": "GREEN", "P3": "RED", "P4": "RED"
-            },
+            'signal_status': signal_status,
+            'recent_changes': [],
             'connection_status': False,
             'active_vips': {},
             'deadlock_active': False,
             'last_update': time.time()
         }), 500
-
 
 @app.route('/api/simulate/traffic', methods=['POST'])
 def simulate_traffic():
